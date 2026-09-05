@@ -78,5 +78,7 @@ let package = Package(
         // Tests/TheoryTests for what that costs and why it is worth it.
         .testTarget(name: "TheoryTests", dependencies: ["Theory"], swiftSettings: mode),
         .testTarget(name: "CarrierTests", dependencies: ["Carrier", "Theory"], swiftSettings: mode),
+        .testTarget(name: "ShellTests", dependencies: ["Shell", "Theory"],
+                    swiftSettings: mode + [.interoperabilityMode(.Cxx)]),
     ]
 )

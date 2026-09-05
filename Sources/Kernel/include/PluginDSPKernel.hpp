@@ -26,6 +26,19 @@ class PluginDSPKernel {
 public:
     void initialize(double inSampleRate) {
         mSampleRate = inSampleRate;
+        // Identity maps and no held notes. Done here rather than in a member
+        // initialiser because a 2 x 128 loop in a header that Swift imports is
+        // clearer than two brace-initialiser expressions nobody can read.
+        for (uint32_t buffer = 0; buffer < 2; ++buffer) {
+            for (uint32_t note = 0; note < kNoteMapSize; ++note) {
+                mNoteMaps[buffer][note] = (uint8_t)note;
+            }
+        }
+        for (uint32_t channel = 0; channel < 16; ++channel) {
+            for (uint32_t note = 0; note < kNoteMapSize; ++note) {
+                mHeldNotes[channel][note] = kNoHeldNote;
+            }
+        }
     }
     
     void deInitialize() {
@@ -124,6 +137,18 @@ public:
     
     static constexpr uint32_t kMaxSequenceNotes = 512;
     static constexpr uint32_t kMaxActiveNotes = 64;
+    /// One entry per MIDI note, so the transform's lookup is an array index.
+    static constexpr uint32_t kNoteMapSize = 128;
+    /// "Nothing is sounding for this (channel, note)".
+    ///
+    /// 0xFE rather than 0xFF, and the difference is a bug the kernel harness
+    /// caught: `kMuted` is 0xFF, and a muted note stores its mapping in the
+    /// held table like any other, so with one shared sentinel the note-off
+    /// read "nothing was held here" and passed the original note through. A
+    /// muted note-on produced silence and its note-off produced a note-off —
+    /// for a note nothing had started. Both values are outside MIDI's 0…127,
+    /// which is why the collision was invisible to every type in the file.
+    static constexpr uint8_t kNoHeldNote = 0xFE;
     
     struct SequenceNote {
         double startBeat = 0;
@@ -332,6 +357,71 @@ public:
         return mShared.phaseBeats.load(std::memory_order_relaxed);
     }
 
+    // MARK: - Transform
+    //
+    // Rewriting notes on their way through, which is the other half of what an
+    // AU MIDI processor can be and the first thing this kernel has been asked
+    // for that is not scheduling.
+    //
+    // MelGen, ProgGenie and Serpe are all *generators*: they decide a whole
+    // pattern off-thread and hand it over, and PORTING.md §8 calls that the
+    // invariant — "nothing generates on the audio thread". A quantizer inverts
+    // the dataflow but not that rule, and the distinction is worth stating
+    // rather than re-deriving: **the decision is still off-thread; only the
+    // lookup is on it.** Which pitch classes to snap to, and to what, is
+    // computed by the app and committed as a 128-entry table. The render thread
+    // reads one byte per note-on. It cannot allocate, cannot block and cannot
+    // think.
+    //
+    // The map is double-buffered exactly like the sequence, for the same
+    // reason: a fixed-size buffer flipped by one atomic store means the render
+    // thread never sees a half-written table and never touches a pointer that
+    // could go stale.
+
+    static constexpr uint8_t kMuted = 0xFF;
+
+    /// The same value, reachable from Swift.
+    ///
+    /// A `static constexpr` member does not cross C++ interop — Swift simply
+    /// does not see it — and hard-coding 0xFF on the Swift side would be two
+    /// copies of a sentinel whose whole job is to be unmistakable. One function
+    /// is cheaper than that going wrong.
+    static uint8_t mutedNote() { return kMuted; }
+
+    /// Fills the inactive map. Every entry starts as itself — an untouched
+    /// table is a pass-through, so a half-configured plug-in is silent about it
+    /// rather than silent.
+    void beginNoteMapUpdate() {
+        mMapStagingIndex = 1 - mShared.mapIndex.load(std::memory_order_acquire);
+        for (uint32_t note = 0; note < kNoteMapSize; ++note) {
+            mNoteMaps[mMapStagingIndex][note] = (uint8_t)note;
+        }
+    }
+
+    /// `outgoing` may be `kMuted`, which swallows the note.
+    ///
+    /// Swallowing rather than snapping is a real mode — "play only what is in
+    /// the set" is a different instrument from "bend everything into it" — and
+    /// it costs one sentinel value here instead of a second table.
+    void setMappedNote(uint8_t incoming, uint8_t outgoing) {
+        if (incoming >= kNoteMapSize) { return; }
+        mNoteMaps[mMapStagingIndex][incoming] = outgoing;
+    }
+
+    void commitNoteMap() {
+        mShared.mapIndex.store(mMapStagingIndex, std::memory_order_release);
+    }
+
+    /// Off by default. A MIDI processor that rewrote notes before anybody asked
+    /// it to would be a bug that sounds like a feature.
+    void setTransformEnabled(bool enabled) {
+        mShared.transformEnabled.store(enabled, std::memory_order_release);
+    }
+
+    bool isTransformEnabled() const {
+        return mShared.transformEnabled.load(std::memory_order_relaxed);
+    }
+
     // MARK: - Capture
 
     /// Whether incoming MIDI is collected for learning. Off by default: capture
@@ -504,10 +594,93 @@ public:
             captureEventList(&midiEvent->eventList);
         }
 
-        // Pass incoming MIDI through unchanged.
-        if (mMIDIOutBlock)
-        {
+        if (!mMIDIOutBlock) { return; }
+
+        // Pass incoming MIDI through unchanged unless a map says otherwise.
+        // The common case is one branch and one atomic load.
+        if (!mShared.transformEnabled.load(std::memory_order_relaxed)) {
             mMIDIOutBlock(now, 0, &midiEvent->eventList);
+            return;
+        }
+        transformEventList(now, &midiEvent->eventList);
+    }
+
+    /// Rewrites note numbers on their way out, and keeps note-offs matched.
+    ///
+    /// The matching is the whole difficulty and it is not optional. A note-on
+    /// for 61 mapped to 60 must be followed by a note-off for **60**, not for
+    /// 61 — the map may have changed in between, or the same incoming note may
+    /// have been mapped differently when it started. So what was actually sent
+    /// is remembered per (channel, note) and the note-off reads it back. Get
+    /// this wrong and the symptom is a stuck note, which is the worst bug a
+    /// MIDI processor has because it outlives the plug-in that caused it.
+    ///
+    /// Anything that is not a note-on or note-off — control change, pitch bend,
+    /// clock, sysex — is forwarded untouched, one packet at a time.
+    void transformEventList(AUEventSampleTime now, const MIDIEventList *list) {
+        if (list == nullptr) { return; }
+        const uint8_t map = (uint8_t)mShared.mapIndex.load(std::memory_order_acquire);
+
+        const MIDIEventPacket *packet = &list->packet[0];
+        for (uint32_t index = 0; index < list->numPackets; ++index) {
+            // A copy on the stack, edited in place. Fixed size, no allocation.
+            MIDIEventPacket edited = *packet;
+            bool swallow = false;
+
+            for (uint32_t word = 0; word < edited.wordCount; ++word) {
+                const uint32_t first = edited.words[word];
+                const uint8_t messageType = (uint8_t)((first >> 28) & 0xF);
+                const bool isMIDI1 = messageType == 0x2;
+                const bool isMIDI2 = messageType == 0x4 && word + 1 < edited.wordCount;
+                if (!isMIDI1 && !isMIDI2) {
+                    const uint8_t words = umpWordCount(messageType);
+                    if (words > 1) { word += (words - 1); }
+                    continue;
+                }
+
+                const uint8_t status = (uint8_t)((first >> 20) & 0xF);
+                const uint8_t channel = (uint8_t)((first >> 16) & 0xF);
+                const uint8_t note = (uint8_t)((first >> 8) & 0x7F);
+                const bool velocityZero = isMIDI1
+                    ? ((uint8_t)(first & 0x7F) == 0)
+                    : (((uint16_t)((edited.words[word + 1] >> 16) & 0xFFFF)) == 0);
+                const bool isOn = status == 0x9 && !velocityZero;
+                const bool isOff = status == 0x8 || (status == 0x9 && velocityZero);
+
+                uint8_t outgoing = note;
+                if (isOn) {
+                    outgoing = mNoteMaps[map][note];
+                    // Remember what was sent, so the note-off can follow it.
+                    mHeldNotes[channel][note] = outgoing;
+                } else if (isOff) {
+                    const uint8_t held = mHeldNotes[channel][note];
+                    // No record means the note-on arrived before the transform
+                    // was switched on, or before this plug-in was in the chain.
+                    // Passing it through unchanged is the safe answer: at worst
+                    // it is a note-off nothing is holding.
+                    outgoing = held == kNoHeldNote ? note : held;
+                    mHeldNotes[channel][note] = kNoHeldNote;
+                }
+
+                if ((isOn || isOff) && outgoing == kMuted) {
+                    swallow = true;
+                    break;
+                }
+                if ((isOn || isOff) && outgoing != note) {
+                    edited.words[word] = (first & ~(uint32_t)(0x7F << 8))
+                                       | ((uint32_t)(outgoing & 0x7F) << 8);
+                }
+                if (isMIDI2) { ++word; }
+            }
+
+            if (!swallow) {
+                MIDIEventList out = {};
+                MIDIEventPacket *slot = MIDIEventListInit(&out, kMIDIProtocol_2_0);
+                slot = MIDIEventListAdd(&out, sizeof(MIDIEventList), slot,
+                                        edited.timeStamp, edited.wordCount, edited.words);
+                mMIDIOutBlock(now, 0, &out);
+            }
+            packet = MIDIEventPacketNext(packet);
         }
     }
 
@@ -642,6 +815,16 @@ public:
     double mSequenceLengths[2] = {0, 0};
     uint32_t mStagingIndex = 1;
 
+    // The note map, double-buffered the same way and for the same reason. Both
+    // buffers start as the identity, so a kernel whose map was never written is
+    // a pass-through even with the transform switched on.
+    uint8_t mNoteMaps[2][kNoteMapSize];
+    uint32_t mMapStagingIndex = 1;
+    /// What was actually sent for each (channel, incoming note) that is
+    /// sounding, so the note-off can follow the note-on. Render thread only —
+    /// no atomics, because nothing else touches it.
+    uint8_t mHeldNotes[16][kNoteMapSize];
+
     // Fields shared across threads, gathered in one place because std::atomic is
     // neither copyable nor movable: a bare atomic member makes the whole kernel
     // un-importable by Swift's C++ interop (the type simply disappears from
@@ -666,6 +849,10 @@ public:
         /// How many MIDI events have been captured, ever. The render thread
         /// writes; the UI reads forward from its own cursor.
         std::atomic<uint64_t> captureWrite{0};
+        /// Which note map the render thread reads (UI thread writes).
+        std::atomic<uint32_t> mapIndex{0};
+        /// Whether to rewrite notes at all. Off by default.
+        std::atomic<bool> transformEnabled{false};
 
         SharedFields() = default;
         SharedFields(const SharedFields &other)
@@ -675,7 +862,9 @@ public:
           loopBeats{other.loopBeats.load(std::memory_order_relaxed)},
           phaseBeats{other.phaseBeats.load(std::memory_order_relaxed)},
           restartRequested{other.restartRequested.load(std::memory_order_relaxed)},
-          captureWrite{other.captureWrite.load(std::memory_order_acquire)} {}
+          captureWrite{other.captureWrite.load(std::memory_order_acquire)},
+          mapIndex{other.mapIndex.load(std::memory_order_acquire)},
+          transformEnabled{other.transformEnabled.load(std::memory_order_relaxed)} {}
         SharedFields &operator=(const SharedFields &other) {
             activeIndex.store(other.activeIndex.load(std::memory_order_acquire), std::memory_order_release);
             passIndex.store(other.passIndex.load(std::memory_order_acquire), std::memory_order_release);
@@ -684,6 +873,8 @@ public:
             phaseBeats.store(other.phaseBeats.load(std::memory_order_relaxed), std::memory_order_relaxed);
             restartRequested.store(other.restartRequested.load(std::memory_order_relaxed), std::memory_order_relaxed);
             captureWrite.store(other.captureWrite.load(std::memory_order_acquire), std::memory_order_release);
+            mapIndex.store(other.mapIndex.load(std::memory_order_acquire), std::memory_order_release);
+            transformEnabled.store(other.transformEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
             return *this;
         }
     };
