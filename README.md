@@ -18,8 +18,8 @@ the long version is [PORTING.md](https://github.com/Enkerli/MelGen/blob/main/POR
 | Target | What it is | Lines |
 |---|---|---:|
 | `Core` | Primitives with nothing musical in them. A seeded RNG is the whole layer, and that is the right size for it | 46 |
-| `Theory` | 172 chord qualities generated from `packages/theory`, chord-scale, parser, detector, diatonic harmony, taxicab voice leading, voicings, the degree histogram, the progression generator and its corpus tables. The Swift port of `@enkerli/theory` | 3,432 |
-| `Carrier` | The interchange format and everything that handles it: a degree-relative pattern and its notes, measurement, provenance, curation as dispositions and passes, the pattern store, SMF read/write. **This one has no counterpart in the monorepo** — it was invented for MelGen and is not melody-specific | 3,708 |
+| `Theory` | 172 chord qualities generated from `packages/theory`, chord-scale, parser, detector, diatonic harmony, taxicab voice leading, voicings, the degree histogram, the progression generator and its corpus tables — and rhythm: Björklund, Barlow indispensability and its transforms, and the codecs. The Swift port of `@enkerli/theory` | 4,000 |
+| `Carrier` | The interchange format and everything that handles it: a degree-relative pattern and its notes, measurement, provenance, curation as dispositions and passes, the pattern store, SMF read/write, and rhythm replacement — a line you kept, performed on a different grid. **Mostly without a counterpart in the monorepo** — the curation half was invented for MelGen and is not melody-specific | 3,880 |
 | `UI` | Theme and its WCAG audit, piano roll, mini roll, action badges, curation view, the pinned verb bar | 2,532 |
 | `Shell` | AU plumbing: the parameter tree, `ObservableAUParameter`, `PluginAudioUnit` and `PluginViewController` | 906 |
 | `Kernel` | The header-only C++ DSP kernel — forward / backward / ping-pong, host sync, loop counter, lock-free capture ring — plus the one Objective-C++ compile unit SwiftPM needs to build it | (in `Shell`'s count) |
@@ -52,6 +52,30 @@ worked example: see `MelGenExtension/AudioUnit/` in
 sharing one means the host resolves either name to whichever it indexed first.
 MelGen's `Scripts/tests/component-identity.py` checks a candidate against every
 sibling checkout, JUCE and Swift alike.
+
+## Conformance
+
+`swift test` runs the parts of this package that are ports rather than
+inventions, against the monorepo's own answers:
+
+```bash
+git clone https://github.com/Enkerli/music-suite ../music-suite
+swift test            # or MUSIC_SUITE=/path/to/music-suite swift test
+```
+
+Without that checkout every conformance case is skipped, loudly, with the clone
+line printed and the words "NOT RUN" — a skip is not a pass, and this suite has
+learned that the hard way often enough to say so in the output.
+
+What is held to vectors today: Björklund, Barlow indispensability and its
+tables, Barlow syncopation, the dilution/concentration transforms, and the
+binary/decimal/hex/octal codecs including the 128-case batch. The rhythm port is
+the fourth language in that contract after TypeScript, Lua and C++.
+
+The chord dictionary and the progression tables are generated rather than tested
+— `Scripts/generate-chord-dictionary.py --check` and its progression sibling live
+in the [MelGen](https://github.com/Enkerli/MelGen) repo and write into
+`Sources/Theory/` here.
 
 ## About `public` here, and about the history
 
