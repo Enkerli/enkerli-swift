@@ -70,5 +70,13 @@ let package = Package(
         .target(name: "Shell",
                 dependencies: ["Core", "Theory", "Carrier", "Kernel"],
                 swiftSettings: mode + [.interoperabilityMode(.Cxx)]),
+
+        // Conformance, not unit tests. The point of these is that a Swift
+        // answer and a TypeScript answer to the same question agree, so they
+        // read `packages/theory/vectors/*.json` out of a sibling music-suite
+        // checkout and skip — loudly — when it is not there. See
+        // Tests/TheoryTests for what that costs and why it is worth it.
+        .testTarget(name: "TheoryTests", dependencies: ["Theory"], swiftSettings: mode),
+        .testTarget(name: "CarrierTests", dependencies: ["Carrier", "Theory"], swiftSettings: mode),
     ]
 )
