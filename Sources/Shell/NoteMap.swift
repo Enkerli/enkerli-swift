@@ -70,7 +70,11 @@ public struct NoteMap: Hashable, Sendable {
     // MARK: - Building one from a pitch-class set
 
     /// How a note outside the set is handled.
-    public enum Snap: String, CaseIterable, Sendable {
+    ///
+    /// `Codable` because it ends up inside a plug-in's session, which is how
+    /// every plug-in on this shell persists — cheaper here than a shim in each
+    /// consumer.
+    public enum Snap: String, Codable, CaseIterable, Sendable {
         /// To the nearest member, ties going down.
         case nearest
         /// To the nearest member at or below it.

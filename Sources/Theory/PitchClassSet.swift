@@ -138,7 +138,7 @@ public enum PitchClassSet {
     /// offered to call something a `13♯11` would be answering a question nobody
     /// asked of it. Use the dictionary when the question is "what chord is
     /// this"; use this when it is "what does this degree stack look like".
-    public enum DegreeQuality: String, Hashable, Sendable, CaseIterable {
+    public enum DegreeQuality: String, Codable, Hashable, Sendable, CaseIterable {
         case maj, min, dim, aug, sus4
         case maj7, dominant7 = "7", min7, halfDim7, dim7, minMaj7
         case set
@@ -239,7 +239,7 @@ public enum PitchClassSet {
         return base
     }
 
-    public enum StackType: String, Hashable, Sendable, CaseIterable {
+    public enum StackType: String, Codable, Hashable, Sendable, CaseIterable {
         /// Thirds: scale steps 0, 2, 4.
         case triads
         /// Steps 0, 3, 4 — a sus-flavoured stack, not a transposition of a triad.
