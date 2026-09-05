@@ -21,8 +21,8 @@ the long version is [PORTING.md](https://github.com/Enkerli/MelGen/blob/main/POR
 | `Theory` | 172 chord qualities generated from `packages/theory`, chord-scale, parser, detector, diatonic harmony, taxicab voice leading, voicings, the degree histogram, the progression generator and its corpus tables — and rhythm: Björklund, Barlow indispensability and its transforms, and the codecs. The Swift port of `@enkerli/theory` | 4,000 |
 | `Carrier` | The interchange format and everything that handles it: a degree-relative pattern and its notes, measurement, provenance, curation as dispositions and passes, the pattern store, SMF read/write, and rhythm replacement — a line you kept, performed on a different grid. **Mostly without a counterpart in the monorepo** — the curation half was invented for MelGen and is not melody-specific | 3,880 |
 | `UI` | Theme and its WCAG audit, piano roll, mini roll, action badges, curation view, the pinned verb bar | 2,532 |
-| `Shell` | AU plumbing: the parameter tree, `ObservableAUParameter`, `PluginAudioUnit` and `PluginViewController` | 906 |
-| `Kernel` | The header-only C++ DSP kernel — forward / backward / ping-pong, host sync, loop counter, lock-free capture ring — plus the one Objective-C++ compile unit SwiftPM needs to build it | (in `Shell`'s count) |
+| `Shell` | AU plumbing: the parameter tree, `ObservableAUParameter`, `PluginAudioUnit`, `PluginViewController`, and `NoteMap` — where every incoming note goes, decided off the audio thread | 1,090 |
+| `Kernel` | The header-only C++ DSP kernel — forward / backward / ping-pong, host sync, loop counter, lock-free capture ring, and the note-rewriting transform path — plus the one Objective-C++ compile unit SwiftPM needs to build it | (in `Shell`'s count) |
 
 `Shell` and `UI` are **siblings, not stacked**: the kernel is handed notes and
 the piano roll draws them, and neither may name the other. `Package.swift` says
@@ -31,6 +31,14 @@ that by omission, which means the build cannot enforce it — MelGen's
 any repo that consumes this one.
 
 ## Building a plug-in on it
+
+**Generators and transformers.** Three plug-ins so far decide a whole pattern
+off-thread and hand the kernel already-decided notes; that is the invariant
+[PORTING.md](https://github.com/Enkerli/MelGen/blob/main/PORTING.md) §8 calls
+"nothing generates on the audio thread". The kernel also rewrites incoming notes
+now, which inverts the dataflow without breaking that rule: a `NoteMap` is 128
+bytes computed in Swift at whatever leisure the app likes, and the render thread
+reads one byte per note-on. The decision is off-thread; only the lookup is on it.
 
 A plug-in supplies four things and inherits the rest:
 
@@ -68,9 +76,27 @@ line printed and the words "NOT RUN" — a skip is not a pass, and this suite ha
 learned that the hard way often enough to say so in the output.
 
 What is held to vectors today: Björklund, Barlow indispensability and its
-tables, Barlow syncopation, the dilution/concentration transforms, and the
-binary/decimal/hex/octal codecs including the 128-case batch. The rhythm port is
-the fourth language in that contract after TypeScript, Lua and C++.
+tables, Barlow syncopation, the dilution/concentration transforms, the
+binary/decimal/hex/octal codecs including the 128-case batch, and the whole
+pitch-class-set surface — scale families, degree chords, the classifier, the
+circle of fifths, consonance and the Roman numerals. Both ports are the fourth
+language in that contract after TypeScript, Lua and C++.
+
+### The kernel
+
+```bash
+Scripts/check-kernel.sh
+```
+
+The render thread is C++ and neither `swift test` nor an Xcode test target
+reaches it, so the one file in this package that runs under a real-time
+constraint is checked by a harness compiled straight with `clang++`. It covers
+the transform path — note rewriting, and the note-off matching that is the
+difference between a quantizer and a stuck note.
+
+**Two halves, and neither is sufficient.** `swift test` covers the decision
+(which note goes where); `check-kernel.sh` covers the rewrite (what the render
+thread does with that answer). "swift test passed" is not "the quantizer works".
 
 The chord dictionary and the progression tables are generated rather than tested
 — `Scripts/generate-chord-dictionary.py --check` and its progression sibling live
