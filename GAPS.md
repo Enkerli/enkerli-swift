@@ -218,19 +218,33 @@ amplitude, legato does not retrigger, and everything that could step glides.
 | No presets. A synth without presets is a synth nobody hears twice | **Build.** Shared gap, and the one plug-in where it stops being optional |
 | Resonance at 1.0 is a clean sine, not the rich self-oscillation a real filter gives — no soft saturation on the feedback path | **Decide.** Noted in Vane's own file as future work and still future work |
 
+### SwiftWorkspace — `aumi Bnch`
+
+*The suite's message bus, inside a DAW: watch the plane, and play what crosses it.*
+
+Not a port of the web workspace's modules, and it does not pretend to be. It is
+the half of the JUCE plug-in that is a plug-in's job — bus notes out as real host
+MIDI, host MIDI in, and the plane made visible — plus the one module a plug-in
+most needs, which is a monitor.
+
+| Gap | Intent |
+|---|---|
+| **Note-offs come from a timer, not the render block.** A `durationMs` is honoured on the main queue, so it is good enough to audition a chord and not good enough to play in time. The JUCE build has `LiveNoteScheduler` for exactly this | **Build.** The kernel already schedules a whole sequence sample-accurately; what is missing is a way to hand it *one* note now, which is a small addition to a path that exists |
+| Host MIDI is not announced on the plane. `announcesInput` exists, defaults off, and nothing implements it | **Build.** It is the other half of what makes a workspace a hub, and the capture ring already collects the notes |
+| No modules beyond the monitor and a note sender. No control surface, no UPI pattern module, no bindings | **Decide**, module by module. Some of these are better as their own plug-ins on this foundation — SwiftSerpe *is* the UPI module — and a workspace that reimplements them would be the accumulation the rewrite exists to avoid |
+| Nothing sends a `manifest`, so nothing on the plane knows what this plug-in can be told | **Build.** The protocol's control plane is the interesting half and this speaks none of it yet |
+| The layout does not ride the DAW session, because there is no layout | **Won't**, until there are modules to arrange |
+| Two instances see the same routing and both will play it | **Won't** — that is what a bus is. `Play notes` exists to turn one of them off |
+
 ---
 
-## The one that is not on this foundation, and the one that changed its mind
+## The two that changed their minds
 
-Eight of the nine plug-ins in the suite have a Swift-native version. One does
-not, and this section exists so that stays a decision rather than a gap somebody
-quietly closes later by building a broken one.
-
-`Scripts/check-gaps.sh` only knows about plug-ins that exist beside the
-checkout, so this one would never make it fail. That is exactly why it is
-written down — along with the argument that *was* here for Vane, which was
-overruled, and is kept rather than deleted because a reversed decision is more
-instructive than a tidy page.
+**All nine plug-ins in the suite now have a Swift-native version.** This section
+used to hold the two we declined to port, and both arguments were overruled —
+so what is left of it is the arguments themselves, kept rather than deleted,
+because two reversed decisions with the same shape are worth more than a tidy
+page.
 
 ### Vane — **built after all**
 
@@ -258,34 +272,33 @@ about a shape, and shapes can be changed.** The question to ask of the next one
 is not whether the constraint is real but whether relaxing it costs more than
 the thing is worth.
 
-### Suite Workspace — `aumi Wksp` — **a container, and the container is the product**
+### Suite Workspace — **built after all, and not the way the argument assumed**
 
-*The suite's movable modules on one message bus, inside a DAW.* 460 lines of
-plug-in wrapping a web app that is the actual thing.
+This section said **won't** too, and it was wrong in the same shape as Vane's:
 
-This one is an `aumi` MIDI processor and does fit the kernel — it schedules
-notes, passes incoming MIDI through, and rides the DAW session. The obstacle is
-the opposite of Vane's: there is nothing to port, because the plug-in is not
-where the product lives.
+> Workspace's 460 lines swap the edges of a bus … Everything a user would call
+> "Workspace" is `music-suite/apps/workspace`, in TypeScript … Rewriting the 460
+> lines in Swift gains nothing and loses the app.
 
-Workspace's 460 lines swap the edges of a bus: bus `note` messages become host
-MIDI, host MIDI feeds the bindings module, the layout rides `getStateInformation`.
-Everything a user would call "Workspace" — the modules, the bus, the control
-engine, the layout — is `music-suite/apps/workspace`, in TypeScript, shared with
-the web. **Rewriting the 460 lines in Swift gains nothing and loses the app.**
+The mistake was looking at `modules.js` — 2,223 lines importing a dozen monorepo
+packages — concluding the product was the web app, and stopping. Underneath it
+is `@enkerli/protocol`: a small package with **committed byte-exact vectors**,
+whose own header calls them "the cross-language contract for that C++ side,
+exactly like @enkerli/theory's rhythm vectors."
 
-Rewriting the *app* in SwiftUI is a different proposal and a large one, and it
-would be a fork: two implementations of a module system that has to agree with
-itself across languages, with no cross-language vector suite of the kind
-`packages/upi` and `packages/theory` have. The suite's whole method for keeping
-implementations honest is conformance vectors, and a module bus is not the kind
-of thing those cover.
+Porting *that* is not forking a module system. It is the same job as the theory
+and UPI vectors, and it was already half done — the bus rides SysEx, and the
+kernel grew SysEx in and out for the RND companion.
 
-**Intent: won't**, for a reason that is not about this foundation at all: a
-container whose contents are shared with the web should keep them shared. The
-JUCE build is the right shape for what it does, and the WebView is not a
-compromise there — it is the mechanism by which one workspace exists rather than
-two.
+So the protocol is `Carrier`'s now, checked in both directions against all ten
+vectors, and the plug-in is
+[SwiftWorkspace](https://github.com/Enkerli/SwiftWorkspace) — `aumi Bnch`. It is
+**not** a port of the web app's modules, and does not pretend to be: it is the
+half of that plug-in that is genuinely a plug-in's job.
+
+Twice now the "won't" was an argument about the wrong layer. Rule 5 below is
+amended accordingly.
+
 
 ---
 
@@ -310,12 +323,18 @@ skateboard grows into the same car.
 of this file. Gaps are honest; inert controls are not, and they are the one
 category here with no "decide" option.
 
-**5. A plug-in we decline to port gets an argument, not a silence.** The section
-above. `check-gaps.sh` can only notice a plug-in that exists, so one that does
-not is the most likely to be built badly later by somebody who assumed nobody
-had thought about it. It says what would have to change for it to be wrong —
-and in Vane's case something did, which is the best evidence that writing the
-argument down was worth it.
+**5. A plug-in we decline to port gets an argument, not a silence — and the
+argument is probably about the wrong layer.** Both of the two we declined were
+overruled, and both arguments failed the same way: they looked at the largest,
+most visible artefact (Vane's 10,533 lines; Workspace's 2,223-line `modules.js`)
+and generalised from it, without asking what was *underneath*. Underneath Vane
+was a missing audio path, which a sibling target supplies. Underneath Workspace
+was a 706-line protocol with committed vectors, which is the suite's most
+routine kind of port.
+
+So the rule now has a second half: before writing "won't", name the layer the
+obstacle actually lives at, and check whether that layer is the one you looked
+at. Both times it was not.
 
 ---
 
