@@ -1,9 +1,9 @@
 # What the Swift plug-ins do not do yet
 
-*A register, and a strategy for it. Written 2026-09-05, covering the five
-plug-ins built on this package. Kept here rather than in any one of them because
-most of the gaps are shared, and a list that lives in five places is five lists
-that disagree.*
+*A register, and a strategy for it. Written 2026-09-05, covering the seven
+plug-ins built on this package — and the two that are not. Kept here rather than
+in any one of them because most of the gaps are shared, and a list that lives in
+seven places is seven lists that disagree.*
 
 ---
 
@@ -168,6 +168,109 @@ harness, which is the half that can be wrong silently.
 | The probe cannot distinguish "the host dropped our output" from "nothing is attached" | **Won't** — it is not a limitation, it is the truth, and the verdict says so in as many words. Anything else would be a green light that means nothing |
 | No timestamps in the traffic log beyond arrival order | **Decide.** Ordering is what matters for framing bugs; latency would be a different instrument |
 
+### SwiftRndCompanion — `aumi RnCo`
+
+*Capture and send patch seeds on a Cymaforma RND, and keep the ones worth
+remembering.*
+
+The skateboard with the largest car behind it: the JUCE build is 3,237 lines
+plus a WebView app from the monorepo, two transports, and a library in the
+suite's interchange format. This is one transport, one screen, and a library in
+`UserDefaults`.
+
+**It has never been run against the hardware.** Nothing below that line can be
+called verified, the protocol itself is observed rather than published, and a
+firmware update can invalidate any of it. That is the first row for a reason.
+
+| Gap | Intent |
+|---|---|
+| Never tested against an RND. Every check is bytes and bookkeeping | **Build** — meaning: take the measurement. This is not a feature gap, it is the thing that decides whether any other row is worth doing |
+| **No direct MIDI port.** The JUCE build opens the device itself, which is the only thing that works in Logic and Bitwig; this one is host-routed only, proven in AUM and nowhere else | **Decide**, and it is the biggest question on this page — shared with SwiftRndSysExProbe, which is where the measurement would come from |
+| The seed library is `UserDefaults` JSON, not the suite's `enkerli-library-item` envelope. The JUCE build writes files that open in the rest of the suite | **Build.** It is a format, the spec exists, and a library that only this plug-in can read is a library that leaves with the plug-in |
+| No export or import of a seed library at all | **Build**, with the above — one job, not two |
+| The tonic pulse's note-off is in the same burst as its note-on, so the gate is one render block. The JUCE version carried a millisecond delay | **Decide** — and the honest state is *unknown*: whether the device needs a longer gate has not been tested, and the burst does not currently express a delay |
+| No seed randomiser, and no history of what was sent | **Decide.** The device generates; asking a plug-in to guess seeds at it is a different product |
+| Nothing reads the two unknown bytes in a `trackEngine` frame | **Won't**, until there is a capture that explains them. Decoding a byte nobody understands into a label would be inventing a fact |
+| Scale and tonic lock on the device and only a power cycle is known to clear it. The interface says so; nothing prevents it | **Won't.** A control that refuses to do what it says is worse than one that warns |
+
+---
+
+## The two that are not on this foundation
+
+Seven of the nine plug-ins in the suite have a Swift-native version. The other
+two do not, and this section exists so that stays a decision rather than a gap
+somebody quietly closes later by building a broken one.
+
+`Scripts/check-gaps.sh` only knows about plug-ins that exist beside the
+checkout, so neither of these would ever make it fail. That is exactly why they
+are written down.
+
+### Vane — `aumi VAne` — **a synth, and this foundation has no audio path**
+
+*An MPE / MTS-ESP / CC-first wavetable synthesizer for wind and breath
+controllers.* 10,533 lines, `IS_SYNTH TRUE`.
+
+Every plug-in on this package is an `aumi` MIDI processor. The kernel's three —
+now four — jobs are all about *messages*: schedule notes, rewrite notes, play
+curves, carry bytes. **None of them touches a sample.** There is no oscillator,
+no filter, no voice allocator, no `AVAudioPCMBuffer` being filled, and the
+render block's entire output is `mMIDIOutBlock`.
+
+This is not a missing feature; it is the shape of the thing. PORTING.md §8's
+invariant — *nothing generates on the audio thread* — is what makes Foundation
+Models and Core ML usable in MelGen at all, and it is stated as a rule about
+generation because everything here decides off-thread and *looks up* on it. A
+synth inverts that: its render block is where the work is, by definition, and it
+must produce a sample every sample whether or not anything has been decided.
+
+So a "Vane MVP on this foundation" would be one of two things, and both are
+worse than not doing it:
+
+- A `aumi` plug-in that emits MIDI and no audio, which is not a synth.
+- A new `aumu` shell with its own kernel, sharing `Theory` and `UI` and
+  approximately nothing else — which is a *second* foundation wearing this one's
+  name, and the reason PORTING.md's layering is enforced by the compiler is to
+  stop that happening by accident.
+
+**Intent: won't**, and specifically won't *here*. A Swift AUv3 synth is a
+perfectly good project; it is not a plug-in on this package. If one is ever
+built, `Theory` and `UI` are what it should take, and it should take them by
+depending on this package rather than by growing an audio path inside it.
+
+The part of Vane that *would* fit is the expression side — breath, MPE, the
+gestural curves — and some of it already exists here in a different guise:
+SwiftDrawnQurve's lanes are a curve engine emitting CC and pitch bend. That is
+worth noticing and is not worth calling a port.
+
+### Suite Workspace — `aumi Wksp` — **a container, and the container is the product**
+
+*The suite's movable modules on one message bus, inside a DAW.* 460 lines of
+plug-in wrapping a web app that is the actual thing.
+
+This one is an `aumi` MIDI processor and does fit the kernel — it schedules
+notes, passes incoming MIDI through, and rides the DAW session. The obstacle is
+the opposite of Vane's: there is nothing to port, because the plug-in is not
+where the product lives.
+
+Workspace's 460 lines swap the edges of a bus: bus `note` messages become host
+MIDI, host MIDI feeds the bindings module, the layout rides `getStateInformation`.
+Everything a user would call "Workspace" — the modules, the bus, the control
+engine, the layout — is `music-suite/apps/workspace`, in TypeScript, shared with
+the web. **Rewriting the 460 lines in Swift gains nothing and loses the app.**
+
+Rewriting the *app* in SwiftUI is a different proposal and a large one, and it
+would be a fork: two implementations of a module system that has to agree with
+itself across languages, with no cross-language vector suite of the kind
+`packages/upi` and `packages/theory` have. The suite's whole method for keeping
+implementations honest is conformance vectors, and a module bus is not the kind
+of thing those cover.
+
+**Intent: won't**, for a reason that is not about this foundation at all: a
+container whose contents are shared with the web should keep them shared. The
+JUCE build is the right shape for what it does, and the WebView is not a
+compromise there — it is the mechanism by which one workspace exists rather than
+two.
+
 ---
 
 ## The strategy, in four rules
@@ -191,11 +294,17 @@ skateboard grows into the same car.
 of this file. Gaps are honest; inert controls are not, and they are the one
 category here with no "decide" option.
 
+**5. A plug-in we decline to port gets an argument, not a silence.** The section
+above. `check-gaps.sh` can only notice a plug-in that exists, so the two that do
+not are the ones most likely to be built badly later by somebody who assumed
+nobody had thought about it. Both are **won't**, and both say what would have to
+change for that to be wrong.
+
 ---
 
 ## Keeping this true
 
 `Scripts/check-gaps.sh` in this package fails when a plug-in beside the checkout
-has no section here, so a sixth plug-in cannot arrive without its gaps being
+has no section here, so an eighth plug-in cannot arrive without its gaps being
 written down. It does not check the contents — nothing can — but it makes the
 omission loud, which is the failure this file is most likely to have.
