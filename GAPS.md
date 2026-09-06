@@ -58,7 +58,7 @@ rather than five times. That is the main argument for having this file at all.
 
 | Gap | State | Intent |
 |---|---|---|
-| **Host sync / transport** | The kernel has `hostSync` and follows host tempo; MelGen uses it. ProgGenie and SwiftSerpe declare the parameter and it works, but no UI surfaces it. SwiftPitchFold and SwiftDrawnQurve have no transport at all | **Build** — in `Shell`. A shared transport row (play, host sync, direction) that a plug-in opts into is one control, once. SwiftDrawnQurve needs it most: a looping gesture plug-in a host cannot start is a real limitation |
+| **Host sync / transport** | The kernel has `hostSync` and follows host tempo; MelGen uses it. ProgGenie and SwiftSerpe declare the parameter and it works, but no UI surfaces it. SwiftPitchFold and SwiftDrawnQurve have no transport at all. SwiftMIDIcurator is the first to put play and host sync on screen, which is what the shared row should look like | **Build** — in `Shell`. A shared transport row (play, host sync, direction) that a plug-in opts into is one control, once. SwiftDrawnQurve needs it most: a looping gesture plug-in a host cannot start is a real limitation |
 | **Theme choice** | Every plug-in reads `colorScheme` from the environment. `MelGenTheme` has `.light` and `.dark` and no way to choose | **Build** — in `UI`. An AUv3 lives inside somebody else's window and does not always inherit the scheme its author intended. The JUCE DrawnQurve has an explicit Light/Dark switch for exactly this reason |
 | **Presets / factory content** | No plug-in ships presets. `fullState` round-trips a session, so the mechanism exists; nothing populates it | **Decide.** MelGen has `SetupStore`; the others have nothing. Whether a quantizer wants presets is a real question, not an oversight |
 | **MIDI panic** | Nothing sends all-notes-off. The kernel releases what *it* is holding when stopped, per plug-in; nothing clears a host's stuck notes | **Build** — in `Shell`, cheap, and the kernel already tracks held notes for two of its three jobs |
@@ -130,6 +130,26 @@ heard on a device.
 | Teach / CC-learn | **Decide.** Genuinely useful, and it needs the capture ring the kernel already has |
 | Legato mode, one-shot per lane in the UI | **Decide.** `isOneShot` exists in the data and has no control |
 | Pencil tilt and azimuth | **Won't**, yet — but noted, because pressure took one file and tilt would take the same one. The question is whether a third curve per gesture is legible, not whether it is possible |
+
+### SwiftMIDIcurator — `aumi MdCr`
+
+*A library of MIDI clips you can audition, judge and find again.*
+
+The skateboard that is furthest from its car, and in a different direction: the
+JUCE MIDIcurator is a 252-line shell around a curation model that mostly did not
+exist yet. This one has the model — because MelGen needed it and it was built as
+foundation — and almost no shell.
+
+| Gap | Intent |
+|---|---|
+| Harmony is only ever read, never detected. A file with no changes gets no analysis, and the interface says so rather than inventing numbers | **Build.** `Theory` can already name a set from pitch classes; running that over a clip's notes is the missing step, and it turns every unanalysed clip in a library into an analysed one |
+| The library is one flat list. No folders, no saved filters, no search | **Build**, in that order. Search first — a library big enough to need curating is big enough to need finding |
+| Two instances share one library, and the sharing is not transactional: judgements made in one appear in the other on next read, and simultaneous writes take the last one | **Decide.** The alternative is a coordinated store, which is real work for a case (two curators open at once) nobody has hit |
+| No export. A clip you kept cannot be written back out, and `Carrier` has had `MIDIExport.write` the whole time | **Build**, and it is nearly free — the writer is already linked and already round-trips in the test suite |
+| Nothing is ever deleted; a skip is a mark, not a removal | **Won't.** That is the model, not a gap, and it is written here so it does not get "fixed" |
+| `TakeAspect` — *which part* of a clip works — is in the vocabulary and has no control | **Build.** `AspectPicker` exists in the UI kit; the `partial` disposition is the one of seven that currently records less than it could |
+| Playback direction, which the kernel supports and this plug-in deliberately does not declare | **Won't.** A mark records what you heard; hearing a clip backwards and marking the forward one records a judgement of music that is not in the library |
+| Clips are matched as duplicates on pitch and start beat only. Two files that differ in tempo but not in notes are one clip | **Decide.** Probably right, and untested against a real folder of exports |
 
 ---
 

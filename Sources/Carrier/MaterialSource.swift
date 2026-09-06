@@ -124,8 +124,17 @@ public enum TakeSource: String, Codable, Sendable {
     /// A transform of another take, or a point on the morph between two of them.
     /// The only source whose provenance names a parent rather than a progression.
     case mutated
-    /// Played in. The only source that didn't come from this plug-in at all.
+    /// Played in. Didn't come from a generator at all — see also `imported`.
     case captured
+    /// Read out of a MIDI file. Like `captured` it was composed elsewhere, and
+    /// unlike it there was no performance: the timing is whatever the file says.
+    ///
+    /// Added for the curator, which is a plug-in whose material is *only* ever
+    /// this. Calling an imported clip a `pattern` would have put the chip "line"
+    /// on every row in its library, and `TakeFacets.chips` says the source chip
+    /// is "never elided" precisely because it is the one that says how the notes
+    /// got here. A source that lies there is worse than no chip.
+    case imported
     /// Chords rather than a line.
     case comping
     /// A bass part, drawn from a degree histogram and a transition histogram
@@ -142,6 +151,7 @@ public enum TakeSource: String, Codable, Sendable {
         case .chained: return "chained"
         case .mutated: return "variant"
         case .captured: return "played"
+        case .imported: return "imported"
         case .comping: return "comp"
         case .bassline: return "bass"
         }
