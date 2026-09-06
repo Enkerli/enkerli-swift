@@ -207,7 +207,7 @@ amplitude, legato does not retrigger, and everything that could step glides.
 
 | Gap | Intent |
 |---|---|
-| **Never heard.** Its render path is covered by 34 checks including aliasing, clicks and segment offsets, and none of that is the same as somebody blowing into it | **Build** — meaning take the measurement. A wind instrument is a feel, and no harness has an opinion about feel |
+| ~~Never heard~~ — **played on a device 2026-09-06: "limited but working"**. The render path is also covered by 34 checks including aliasing, clicks and segment offsets | **Done, at MVP scope.** "Limited" is this table; "working" is the part no harness could have told us |
 | Monophonic. The kernel merges MPE channels deliberately — one voice, whichever finger is expressing it — so a chord is not possible | **Decide.** Vane is "mono-capable" and this is the capable half. Polyphony means a voice allocator and per-note expression state, which is a real piece of work and a different instrument |
 | One built-in wavetable — the harmonic stack. No `.wav` import, no Serum/Vital frame detection, no library browser | **Build**, in that order, and the table format already supports it: `VaneWavetable` stores mip levels exactly as Vane's does, so an importer fills in frames and changes nothing else |
 | No MTS-ESP. The JUCE build retunes from a host tuning table | **Build.** It is the one feature on this list that this suite has a specific reason to care about, given how much of `Theory` is about what a scale *is* |
