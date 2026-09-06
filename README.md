@@ -32,13 +32,19 @@ any repo that consumes this one.
 
 ## Building a plug-in on it
 
-**Generators and transformers.** Three plug-ins so far decide a whole pattern
-off-thread and hand the kernel already-decided notes; that is the invariant
-[PORTING.md](https://github.com/Enkerli/MelGen/blob/main/PORTING.md) §8 calls
-"nothing generates on the audio thread". The kernel also rewrites incoming notes
-now, which inverts the dataflow without breaking that rule: a `NoteMap` is 128
-bytes computed in Swift at whatever leisure the app likes, and the render thread
-reads one byte per note-on. The decision is off-thread; only the lookup is on it.
+**Three jobs, one rule.** The kernel schedules notes, rewrites incoming ones, and
+plays drawn curves as control changes, pressure, bend or notes. Those are three
+different dataflows — generate, transform, and loop-a-line — and
+[PORTING.md](https://github.com/Enkerli/MelGen/blob/main/PORTING.md) §8's
+invariant covers all of them once it is stated precisely enough:
+
+> **The decision is off-thread. Only the lookup is on it.**
+
+A whole pattern, a 128-byte note map, a 256-sample curve table: each is computed
+in Swift at whatever leisure the app likes and committed as a fixed-size
+snapshot, and the render thread reads it without allocating, blocking, or
+deciding anything still being typed. That sentence is what lets one kernel do
+three jobs without any of them loosening the rule.
 
 A plug-in supplies four things and inherits the rest:
 
