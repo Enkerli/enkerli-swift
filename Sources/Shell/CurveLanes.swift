@@ -42,6 +42,17 @@ public struct CurveLane: Codable, Hashable, Sendable {
     /// gesture: it shares this lane's time base exactly, and separating them
     /// into unrelated lanes would let a later edit break the alignment that is
     /// the whole reason to record it.
+    /// How many columns the playhead snaps to. 0 or 1 means off.
+    ///
+    /// The line's grid, not the pressure companion's — a pressure curve is a
+    /// second dimension of the *same* gesture, and stepping it independently
+    /// would make the two disagree about when a step happens. Both slots get
+    /// this lane's grid.
+    public var quantizeColumns: Int = 0
+
+    /// How many levels the value snaps to. 0 or 1 means off.
+    public var quantizeLevels: Int = 0
+
     public var pressure: GestureCurve?
     /// Whether the companion plays. Separate from `isEnabled`, so pressure can
     /// be muted without muting the line it came from.
@@ -52,13 +63,17 @@ public struct CurveLane: Codable, Hashable, Sendable {
                 pitchClasses: [Int] = [],
                 root: Int = 0,
                 pressure: GestureCurve? = nil,
-                isPressureEnabled: Bool = false) {
+                isPressureEnabled: Bool = false,
+                quantizeColumns: Int = 0,
+                quantizeLevels: Int = 0) {
         self.curve = curve
         self.isEnabled = isEnabled
         self.pitchClasses = pitchClasses
         self.root = root
         self.pressure = pressure
         self.isPressureEnabled = isPressureEnabled
+        self.quantizeColumns = quantizeColumns
+        self.quantizeLevels = quantizeLevels
     }
 
     public init(from decoder: any Decoder) throws {
@@ -68,7 +83,9 @@ public struct CurveLane: Codable, Hashable, Sendable {
                   pitchClasses: try c.decodeIfPresent([Int].self, forKey: .pitchClasses) ?? [],
                   root: try c.decodeIfPresent(Int.self, forKey: .root) ?? 0,
                   pressure: try c.decodeIfPresent(GestureCurve.self, forKey: .pressure),
-                  isPressureEnabled: try c.decodeIfPresent(Bool.self, forKey: .isPressureEnabled) ?? false)
+                  isPressureEnabled: try c.decodeIfPresent(Bool.self, forKey: .isPressureEnabled) ?? false,
+                  quantizeColumns: try c.decodeIfPresent(Int.self, forKey: .quantizeColumns) ?? 0,
+                  quantizeLevels: try c.decodeIfPresent(Int.self, forKey: .quantizeLevels) ?? 0)
     }
 
     /// The 12-bit root-relative mask the kernel wants.
@@ -139,6 +156,9 @@ extension PluginAudioUnit {
                             UInt8(curve.message.kernelValue),
                             curve.isOneShot,
                             enabled)
+        kernel.setCurveLaneGrid(slot,
+                                UInt16(clamping: lane.quantizeColumns),
+                                UInt16(clamping: lane.quantizeLevels))
     }
 
     /// Whether the lanes run at all. Switching it off ends any note they hold.

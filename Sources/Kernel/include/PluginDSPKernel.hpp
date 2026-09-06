@@ -436,6 +436,34 @@ public:
         CurveMessage message = CurveMessage::ControlChange;
         bool oneShot = false;
         bool enabled = false;
+
+        // ── Qurve quantization ─────────────────────────────────────────────
+        //
+        // The JUCE build's most distinctive control, and the two halves are
+        // genuinely different instruments rather than one setting with two
+        // axes.
+        //
+        // **X** snaps the *phase* to a grid of columns, so the playhead steps
+        // instead of gliding: a drawn ramp becomes a staircase, and a drawn
+        // wobble becomes a sequence. It is what turns a gesture into a pattern.
+        //
+        // **Y** snaps the *value* to a grid of rows, so the output takes only
+        // so many levels. On a note lane that is a scale you can see; on a CC
+        // lane it is the difference between a filter sweep and a filter you can
+        // hear moving between positions.
+        //
+        // 0 means off for both, and off is not "a grid of one" — a grid of one
+        // would pin the whole curve to a single value, which is the kind of
+        // edge case that turns a control into a mute.
+        //
+        // Applied *before* the smoother, deliberately. Quantizing after it
+        // would round a value that had already been eased toward the previous
+        // one, so the steps would land in different places depending on how
+        // fast the curve was moving. Before it, the smoother rounds the corners
+        // of a staircase whose treads are where they were drawn — which is what
+        // `smoothing` is for and why a stepped lane still does not click.
+        uint16_t quantizeX = 0;
+        uint16_t quantizeY = 0;
     };
 
     /// Per-lane render-thread state. No atomics: nothing else touches it.
@@ -460,6 +488,22 @@ public:
     void setCurveSample(uint32_t lane, uint32_t index, float value) {
         if (lane >= kMaxCurveLanes || index >= kCurveTableSize) { return; }
         mCurveLanes[mCurveStagingIndex][lane].table[index] = value;
+    }
+
+    /// This lane's quantization grid. Both zero means off.
+    ///
+    /// Separate from `setCurveLane` because it is separate in kind: everything
+    /// there describes the curve that was drawn, and this describes what the
+    /// render thread does to it on the way out. A lane can change its grid
+    /// without its table being re-uploaded, which matters when somebody is
+    /// dragging the control.
+    void setCurveLaneGrid(uint32_t lane, uint16_t columns, uint16_t levels) {
+        if (lane >= kMaxCurveLanes) { return; }
+        // The index  recorded, not a fresh computation of it.
+        // They are the same number today and would stop being so the moment a
+        // commit landed between the two calls.
+        mCurveLanes[mCurveStagingIndex][lane].quantizeX = columns;
+        mCurveLanes[mCurveStagingIndex][lane].quantizeY = levels;
     }
 
     void setCurveLane(uint32_t lane, double durationSeconds,
@@ -840,8 +884,10 @@ public:
             mShared.curvePhases[lane].store(phase, std::memory_order_relaxed);
             if (runtime.finished) { continue; }
 
-            const float raw = sampleCurve(curve, (float)phase);
-            const float ranged = curve.minOut + (curve.maxOut - curve.minOut) * raw;
+            const double gridded = quantizePhase(curve, phase);
+            const float raw = sampleCurve(curve, (float)gridded);
+            const float ranged = quantizeValue(curve,
+                curve.minOut + (curve.maxOut - curve.minOut) * raw);
 
             // One-pole smoothing, and the first value is taken as-is rather
             // than eased up from zero — otherwise every lane opens with a swoop
@@ -855,6 +901,38 @@ public:
             }
             emitCurveValue(sampleTime, lane, curve, runtime, runtime.smoothed);
         }
+    }
+
+    /// Snaps the phase to the start of its column.
+    ///
+    /// Floor rather than round, and that is the whole feel of it: a step must
+    /// begin when the playhead crosses into its column, not half a column
+    /// early. Rounding would make every event arrive ahead of the grid it is
+    /// supposed to be on, which is exactly the complaint people have about
+    /// quantizers that "drag".
+    static double quantizePhase(const CurveLane &curve, double phase) {
+        if (curve.quantizeX < 2) { return phase; }
+        const double columns = (double)curve.quantizeX;
+        double column = floor(phase * columns);
+        if (column >= columns) { column = columns - 1; }
+        return column / columns;
+    }
+
+    /// Snaps a ranged value to one of N levels.
+    ///
+    /// N *levels*, not N intervals: with `quantizeY` at 2 the output is either
+    /// the minimum or the maximum and nothing between, which is what "two
+    /// positions" means to somebody drawing it. Dividing by N instead would give
+    /// two values neither of which is the top of the range, and the lane would
+    /// quietly never reach its own maximum.
+    static float quantizeValue(const CurveLane &curve, float value) {
+        if (curve.quantizeY < 2) { return value; }
+        const float low = std::min(curve.minOut, curve.maxOut);
+        const float high = std::max(curve.minOut, curve.maxOut);
+        if (high <= low) { return value; }
+        const float levels = (float)(curve.quantizeY - 1);
+        const float normalized = (value - low) / (high - low);
+        return low + (high - low) * (roundf(normalized * levels) / levels);
     }
 
     /// Table lookup with linear interpolation, wrapping round rather than off
