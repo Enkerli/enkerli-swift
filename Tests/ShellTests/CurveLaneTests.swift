@@ -57,7 +57,7 @@ import Theory
 }
 
 @Test func aLaneRoundTripsThroughJSON() {
-    var lane = CurveLane(curve: GestureCurve.fromStroke([(0, 0), (0.5, 1), (1, 0)])!,
+    var lane = CurveLane(curve: GestureCurve.fromPoints([(0, 0), (0.5, 1), (1, 0)])!,
                          isEnabled: true,
                          pitchClasses: [0, 3, 7],
                          root: 2)
