@@ -217,6 +217,14 @@ public:
         }
 
         processMelody(bufferStartTime, frameCount);
+
+        // Curve lanes run alongside the note sequence rather than instead of
+        // it. A plug-in that uses one uses only one, but the kernel does not
+        // need to know that, and keeping them independent is what let the note
+        // path stay untouched when this was added.
+        if (mSampleRate > 0 && frameCount > 0) {
+            advanceCurves(bufferStartTime, (double)frameCount / mSampleRate);
+        }
     }
 
     void processMelody(AUEventSampleTime bufferStartTime, AUAudioFrameCount frameCount) {
@@ -355,6 +363,123 @@ public:
     /// playing — so the interface can tell "at beat zero" from "stopped".
     double currentPhaseBeats() const {
         return mShared.phaseBeats.load(std::memory_order_relaxed);
+    }
+
+    // MARK: - Curve lanes
+    //
+    // Playing a drawn line, which is the kernel's third job after scheduling
+    // notes and rewriting them.
+    //
+    // Adapted from GestureEngine in DrawnQurve, and this one is a *move* rather
+    // than a port: that engine is C++ and this is C++, so there is no language
+    // boundary to get wrong and nothing for a vector file to hold. What holds it
+    // is Tests/Kernel/curves-main.mm, the same way the transform path is held.
+    //
+    // Same division as everywhere else in this kernel. Off-thread: the 256
+    // samples, the message type, the range, the scale mask — all committed as a
+    // fixed-size snapshot. On-thread: advance a phase, index the table,
+    // interpolate, smooth, map, and emit only when the value changed. No
+    // allocation, no branching on anything the UI is still deciding.
+    //
+    // A lane emits at most one message per render block, deliberately. The
+    // alternative — a message per frame — floods a MIDI stream with values no
+    // synth can act on and no host can display, and at 48 kHz it is 48,000
+    // control changes a second for a curve nobody can hear moving that fast.
+
+    static constexpr uint32_t kMaxCurveLanes = 4;
+    static constexpr uint32_t kCurveTableSize = 256;
+
+    enum class CurveMessage : uint8_t {
+        ControlChange = 0,
+        ChannelPressure = 1,
+        PitchBend = 2,
+        Note = 3,
+    };
+
+    struct CurveLane {
+        float table[kCurveTableSize] = {};
+        double durationSeconds = 1.0;
+        float minOut = 0.0f;
+        float maxOut = 1.0f;
+        float smoothing = 0.08f;
+        float phaseOffset = 0.0f;
+        /// 12-bit root-relative mask; bit 0 is the root. 0xFFF is chromatic and
+        /// means no quantization. Leftmost = LSB, like every mask in this suite.
+        uint16_t scaleMask = 0x0FFF;
+        uint8_t scaleRoot = 0;
+        uint8_t controller = 74;
+        uint8_t channel = 0;
+        uint8_t velocity = 100;
+        CurveMessage message = CurveMessage::ControlChange;
+        bool oneShot = false;
+        bool enabled = false;
+    };
+
+    /// Per-lane render-thread state. No atomics: nothing else touches it.
+    struct CurveRuntime {
+        double elapsedSeconds = 0;
+        float smoothed = 0;
+        int lastValue = -1;      ///< last emitted, for dedup. -1 = nothing yet
+        int lastRawNote = -1;    ///< before quantization, to tell which way it moved
+        int heldNote = -1;       ///< sounding note in Note mode, -1 = none
+        uint8_t heldChannel = 0; ///< the channel it started on
+        bool started = false;    ///< whether the smoother has a value yet
+        bool finished = false;   ///< a one-shot that has run out
+    };
+
+    void beginCurveUpdate() {
+        mCurveStagingIndex = 1 - mShared.curveIndex.load(std::memory_order_acquire);
+        for (uint32_t lane = 0; lane < kMaxCurveLanes; ++lane) {
+            mCurveLanes[mCurveStagingIndex][lane] = CurveLane{};
+        }
+    }
+
+    void setCurveSample(uint32_t lane, uint32_t index, float value) {
+        if (lane >= kMaxCurveLanes || index >= kCurveTableSize) { return; }
+        mCurveLanes[mCurveStagingIndex][lane].table[index] = value;
+    }
+
+    void setCurveLane(uint32_t lane, double durationSeconds,
+                      float minOut, float maxOut, float smoothing, float phaseOffset,
+                      uint16_t scaleMask, uint8_t scaleRoot,
+                      uint8_t controller, uint8_t channel, uint8_t velocity,
+                      uint8_t message, bool oneShot, bool enabled) {
+        if (lane >= kMaxCurveLanes) { return; }
+        CurveLane &target = mCurveLanes[mCurveStagingIndex][lane];
+        target.durationSeconds = durationSeconds > 0.01 ? durationSeconds : 0.01;
+        target.minOut = minOut;
+        target.maxOut = maxOut;
+        target.smoothing = smoothing;
+        target.phaseOffset = phaseOffset;
+        target.scaleMask = scaleMask;
+        target.scaleRoot = scaleRoot;
+        target.controller = controller;
+        target.channel = channel;
+        target.velocity = velocity;
+        target.message = (CurveMessage)message;
+        target.oneShot = oneShot;
+        target.enabled = enabled;
+    }
+
+    void commitCurves() {
+        mShared.curveIndex.store(mCurveStagingIndex, std::memory_order_release);
+    }
+
+    /// Whether curve lanes run at all. Off until asked, like the transform.
+    void setCurvesEnabled(bool enabled) {
+        mShared.curvesEnabled.store(enabled, std::memory_order_release);
+        if (!enabled) { mShared.curvesStopRequested.store(true, std::memory_order_release); }
+    }
+
+    bool areCurvesEnabled() const {
+        return mShared.curvesEnabled.load(std::memory_order_relaxed);
+    }
+
+    /// Where a lane's playhead is, 0..1, for drawing it. -1 when it is not
+    /// running.
+    double curvePhase(uint32_t lane) const {
+        if (lane >= kMaxCurveLanes) { return -1; }
+        return mShared.curvePhases[lane].load(std::memory_order_relaxed);
     }
 
     // MARK: - Transform
@@ -537,6 +662,229 @@ public:
         mActiveCount += 1;
     }
     
+    /// Advances every enabled curve lane by one block and emits what changed.
+    ///
+    /// One message per lane per block, deliberately — see the note above the
+    /// commit API. `secondsPerBlock` is how much time this block covers, which
+    /// is the only thing a curve needs from the transport: unlike the note
+    /// sequence, a curve loops on its own recorded duration rather than on
+    /// beats, so it does not follow tempo unless somebody asks it to.
+    void advanceCurves(AUEventSampleTime sampleTime, double secondsPerBlock) {
+        if (!mShared.curvesEnabled.load(std::memory_order_relaxed)) {
+            if (mShared.curvesStopRequested.exchange(false, std::memory_order_acq_rel)) {
+                releaseCurveNotes(sampleTime);
+            }
+            return;
+        }
+        const uint32_t set = mShared.curveIndex.load(std::memory_order_acquire);
+
+        for (uint32_t lane = 0; lane < kMaxCurveLanes; ++lane) {
+            const CurveLane &curve = mCurveLanes[set][lane];
+            CurveRuntime &runtime = mCurveRuntimes[lane];
+
+            if (!curve.enabled) {
+                releaseCurveNote(sampleTime, lane);
+                mShared.curvePhases[lane].store(-1.0, std::memory_order_relaxed);
+                runtime.finished = false;
+                continue;
+            }
+
+            runtime.elapsedSeconds += secondsPerBlock;
+            double phase = runtime.elapsedSeconds / curve.durationSeconds;
+            if (phase >= 1.0) {
+                if (curve.oneShot) {
+                    // A one-shot ends where it ends and stays there: releasing
+                    // its note and holding the last value is what "played once"
+                    // has to mean for a controller, which has no note-off.
+                    if (!runtime.finished) {
+                        runtime.finished = true;
+                        releaseCurveNote(sampleTime, lane);
+                    }
+                    phase = 1.0;
+                } else {
+                    runtime.elapsedSeconds = fmod(runtime.elapsedSeconds, curve.durationSeconds);
+                    phase = runtime.elapsedSeconds / curve.durationSeconds;
+                }
+            }
+            mShared.curvePhases[lane].store(phase, std::memory_order_relaxed);
+            if (runtime.finished) { continue; }
+
+            const float raw = sampleCurve(curve, (float)phase);
+            const float ranged = curve.minOut + (curve.maxOut - curve.minOut) * raw;
+
+            // One-pole smoothing, and the first value is taken as-is rather
+            // than eased up from zero — otherwise every lane opens with a swoop
+            // nobody drew.
+            if (!runtime.started) {
+                runtime.smoothed = ranged;
+                runtime.started = true;
+            } else {
+                const float coefficient = curve.smoothing;
+                runtime.smoothed += (ranged - runtime.smoothed) * (1.0f - coefficient);
+            }
+            emitCurveValue(sampleTime, lane, curve, runtime, runtime.smoothed);
+        }
+    }
+
+    /// Table lookup with linear interpolation, wrapping round rather than off
+    /// the end — a loop has no last sample.
+    static float sampleCurve(const CurveLane &curve, float phase) {
+        float shifted = phase + curve.phaseOffset;
+        shifted -= floorf(shifted);
+        const float position = shifted * (float)(kCurveTableSize - 1);
+        const uint32_t low = (uint32_t)position;
+        const uint32_t high = (low + 1) % kCurveTableSize;
+        const float fraction = position - (float)low;
+        return curve.table[low] + fraction * (curve.table[high] - curve.table[low]);
+    }
+
+    /// The nearest member of a root-relative 12-bit mask.
+    ///
+    /// Ties resolve by direction of travel — a curve climbing takes the note
+    /// above, a curve falling takes the one below — which is DrawnQurve's rule
+    /// and is the right one here for the reason the opposite rule is right in a
+    /// quantizer: this is following a line somebody drew, so the fold should go
+    /// the way the line is already going.
+    static uint8_t quantizeCurveNote(int note, uint16_t mask, uint8_t root, bool movingUp) {
+        if (mask == 0x0FFF) { return (uint8_t)(note < 0 ? 0 : (note > 127 ? 127 : note)); }
+        note = note < 0 ? 0 : (note > 127 ? 127 : note);
+        const int interval = ((note % 12) - (int)root + 12) % 12;
+        if ((mask >> interval) & 1) { return (uint8_t)note; }
+
+        int below = -1, above = -1;
+        for (int distance = 1; distance <= 6; ++distance) {
+            if (below < 0 && note - distance >= 0
+                && ((mask >> (((interval - distance) % 12 + 12) % 12)) & 1)) {
+                below = note - distance;
+            }
+            if (above < 0 && note + distance <= 127
+                && ((mask >> ((interval + distance) % 12)) & 1)) {
+                above = note + distance;
+            }
+            if (below >= 0 && above >= 0) { break; }
+        }
+        if (below < 0 && above < 0) { return (uint8_t)note; }
+        if (below < 0) { return (uint8_t)above; }
+        if (above < 0) { return (uint8_t)below; }
+        const int down = note - below, up = above - note;
+        if (down == up) { return (uint8_t)(movingUp ? above : below); }
+        return (uint8_t)(down < up ? below : above);
+    }
+
+    void emitCurveValue(AUEventSampleTime sampleTime, uint32_t lane,
+                        const CurveLane &curve, CurveRuntime &runtime, float value) {
+        const float clamped = value < 0 ? 0 : (value > 1 ? 1 : value);
+        switch (curve.message) {
+            case CurveMessage::ControlChange: {
+                const int coarse = (int)(clamped * 127.0f + 0.5f);
+                if (coarse == runtime.lastValue) { return; }
+                runtime.lastValue = coarse;
+                sendControlChange(sampleTime, curve.channel, curve.controller, (uint8_t)coarse);
+                return;
+            }
+            case CurveMessage::ChannelPressure: {
+                const int coarse = (int)(clamped * 127.0f + 0.5f);
+                if (coarse == runtime.lastValue) { return; }
+                runtime.lastValue = coarse;
+                sendChannelPressure(sampleTime, curve.channel, (uint8_t)coarse);
+                return;
+            }
+            case CurveMessage::PitchBend: {
+                const int wide = (int)(clamped * 16383.0f + 0.5f);
+                if (wide == runtime.lastValue) { return; }
+                runtime.lastValue = wide;
+                sendPitchBend(sampleTime, curve.channel, (uint16_t)wide);
+                return;
+            }
+            case CurveMessage::Note: {
+                const int raw = (int)(clamped * 127.0f + 0.5f);
+                const bool movingUp = runtime.lastValue < 0 || raw >= runtime.lastRawNote;
+                runtime.lastRawNote = raw;
+                const uint8_t note = quantizeCurveNote(raw, curve.scaleMask,
+                                                       curve.scaleRoot, movingUp);
+                if ((int)note == runtime.lastValue) { return; }
+                // Off before on: a curve walking up a scale would otherwise
+                // stack every note it passed through, and a synth with limited
+                // voices would run out inside one loop.
+                releaseCurveNote(sampleTime, lane);
+                runtime.lastValue = note;
+                runtime.heldNote = note;
+                runtime.heldChannel = curve.channel;
+                sendNoteOnChannel(sampleTime, curve.channel, note,
+                                  (uint16_t)curve.velocity * 516);
+                return;
+            }
+        }
+    }
+
+    /// Ends a lane's held note, if it has one. Uses the channel recorded when
+    /// the note started, so changing a lane's channel mid-note does not orphan
+    /// it — the same rule the transform path follows for the same reason.
+    void releaseCurveNote(AUEventSampleTime sampleTime, uint32_t lane) {
+        CurveRuntime &runtime = mCurveRuntimes[lane];
+        if (runtime.heldNote < 0) { return; }
+        sendNoteOffChannel(sampleTime, runtime.heldChannel, (uint8_t)runtime.heldNote);
+        runtime.heldNote = -1;
+        runtime.lastValue = -1;
+    }
+
+    void releaseCurveNotes(AUEventSampleTime sampleTime) {
+        for (uint32_t lane = 0; lane < kMaxCurveLanes; ++lane) {
+            releaseCurveNote(sampleTime, lane);
+            mCurveRuntimes[lane] = CurveRuntime{};
+            mShared.curvePhases[lane].store(-1.0, std::memory_order_relaxed);
+        }
+    }
+
+    void sendControlChange(AUEventSampleTime sampleTime, uint8_t channel,
+                           uint8_t controller, uint8_t value) {
+        sendMIDI1(sampleTime, 0xB, channel, controller, value);
+    }
+
+    void sendChannelPressure(AUEventSampleTime sampleTime, uint8_t channel, uint8_t value) {
+        sendMIDI1(sampleTime, 0xD, channel, value, 0);
+    }
+
+    void sendPitchBend(AUEventSampleTime sampleTime, uint8_t channel, uint16_t value) {
+        // 14-bit, low seven bits first — the one place in MIDI 1.0 where the
+        // least significant byte leads, which is not the suite's leftmost-LSB
+        // convention showing up but does rhyme with it.
+        sendMIDI1(sampleTime, 0xE, channel, (uint8_t)(value & 0x7F), (uint8_t)((value >> 7) & 0x7F));
+    }
+
+    void sendNoteOnChannel(AUEventSampleTime sampleTime, uint8_t channel,
+                           uint8_t note, uint16_t velocity) {
+        sendMIDI1(sampleTime, 0x9, channel, note, midi1Velocity(velocity));
+    }
+
+    void sendNoteOffChannel(AUEventSampleTime sampleTime, uint8_t channel, uint8_t note) {
+        sendMIDI1(sampleTime, 0x8, channel, note, 0);
+    }
+
+    /// One MIDI 1.0 message in a UMP word.
+    ///
+    /// MIDI 1.0 rather than 2.0 for the curve lanes: a control change is seven
+    /// bits wherever it lands, every host understands this encoding, and the
+    /// note path above already uses MIDI2NoteOn where the extra resolution is
+    /// worth having. Mixing the two in one stream is legal.
+    void sendMIDI1(AUEventSampleTime sampleTime, uint8_t status, uint8_t channel,
+                   uint8_t data1, uint8_t data2) {
+        if (mMIDIOutBlock) {
+            const uint32_t word = ((uint32_t)0x2 << 28)
+                                | ((uint32_t)(status & 0xF) << 20)
+                                | ((uint32_t)(channel & 0xF) << 16)
+                                | ((uint32_t)(data1 & 0x7F) << 8)
+                                | (uint32_t)(data2 & 0x7F);
+            MIDIEventList eventList = {};
+            MIDIEventPacket *packet = MIDIEventListInit(&eventList, kMIDIProtocol_2_0);
+            packet = MIDIEventListAdd(&eventList, sizeof(MIDIEventList), packet, 0, 1, &word);
+            mMIDIOutBlock(sampleTime, 0, &eventList);
+        } else if (mLegacyMIDIOutBlock) {
+            const uint8_t bytes[3] = { (uint8_t)((status << 4) | (channel & 0xF)), data1, data2 };
+            mLegacyMIDIOutBlock(sampleTime, 0, status == 0xD ? 2 : 3, bytes);
+        }
+    }
+
     void sendNoteOn(AUEventSampleTime sampleTime, uint8_t noteNum, uint16_t velocity) {
         if (mMIDIOutBlock) {
             auto message = MIDI2NoteOn(0, 0, noteNum, 0, 0, velocity);
@@ -820,6 +1168,10 @@ public:
     // a pass-through even with the transform switched on.
     uint8_t mNoteMaps[2][kNoteMapSize];
     uint32_t mMapStagingIndex = 1;
+
+    CurveLane mCurveLanes[2][kMaxCurveLanes];
+    uint32_t mCurveStagingIndex = 1;
+    CurveRuntime mCurveRuntimes[kMaxCurveLanes];
     /// What was actually sent for each (channel, incoming note) that is
     /// sounding, so the note-off can follow the note-on. Render thread only —
     /// no atomics, because nothing else touches it.
@@ -853,8 +1205,28 @@ public:
         std::atomic<uint32_t> mapIndex{0};
         /// Whether to rewrite notes at all. Off by default.
         std::atomic<bool> transformEnabled{false};
+        /// Which curve set the render thread reads (UI thread writes).
+        std::atomic<uint32_t> curveIndex{0};
+        /// Whether curve lanes run. Off by default.
+        std::atomic<bool> curvesEnabled{false};
+        /// Set when curves are switched off, so the render thread knows to end
+        /// any note they left sounding. Cleared by the render thread.
+        std::atomic<bool> curvesStopRequested{false};
+        /// Where each lane's playhead is, 0..1, or -1 when it is not running.
+        ///
+        /// In here rather than beside the runtimes because of the note at the
+        /// top of this struct, which predicted this exact mistake: an array of
+        /// bare atomics as a member of the kernel makes the whole type
+        /// un-importable by Swift, and the symptom is not an error about
+        /// atomics — it is `cannot find 'PluginDSPKernel' in scope` at every
+        /// use site, because the type simply stops existing in Swift's view.
+        std::atomic<double> curvePhases[kMaxCurveLanes];
 
-        SharedFields() = default;
+        SharedFields() {
+            for (uint32_t lane = 0; lane < kMaxCurveLanes; ++lane) {
+                curvePhases[lane].store(-1.0, std::memory_order_relaxed);
+            }
+        }
         SharedFields(const SharedFields &other)
         : activeIndex{other.activeIndex.load(std::memory_order_acquire)},
           passIndex{other.passIndex.load(std::memory_order_acquire)},
@@ -864,7 +1236,15 @@ public:
           restartRequested{other.restartRequested.load(std::memory_order_relaxed)},
           captureWrite{other.captureWrite.load(std::memory_order_acquire)},
           mapIndex{other.mapIndex.load(std::memory_order_acquire)},
-          transformEnabled{other.transformEnabled.load(std::memory_order_relaxed)} {}
+          transformEnabled{other.transformEnabled.load(std::memory_order_relaxed)},
+          curveIndex{other.curveIndex.load(std::memory_order_acquire)},
+          curvesEnabled{other.curvesEnabled.load(std::memory_order_relaxed)},
+          curvesStopRequested{other.curvesStopRequested.load(std::memory_order_relaxed)} {
+            for (uint32_t lane = 0; lane < kMaxCurveLanes; ++lane) {
+                curvePhases[lane].store(other.curvePhases[lane].load(std::memory_order_relaxed),
+                                        std::memory_order_relaxed);
+            }
+        }
         SharedFields &operator=(const SharedFields &other) {
             activeIndex.store(other.activeIndex.load(std::memory_order_acquire), std::memory_order_release);
             passIndex.store(other.passIndex.load(std::memory_order_acquire), std::memory_order_release);
@@ -875,6 +1255,13 @@ public:
             captureWrite.store(other.captureWrite.load(std::memory_order_acquire), std::memory_order_release);
             mapIndex.store(other.mapIndex.load(std::memory_order_acquire), std::memory_order_release);
             transformEnabled.store(other.transformEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            curveIndex.store(other.curveIndex.load(std::memory_order_acquire), std::memory_order_release);
+            curvesEnabled.store(other.curvesEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            curvesStopRequested.store(other.curvesStopRequested.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            for (uint32_t lane = 0; lane < kMaxCurveLanes; ++lane) {
+                curvePhases[lane].store(other.curvePhases[lane].load(std::memory_order_relaxed),
+                                        std::memory_order_relaxed);
+            }
             return *this;
         }
     };
