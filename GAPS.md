@@ -58,10 +58,10 @@ rather than five times. That is the main argument for having this file at all.
 
 | Gap | State | Intent |
 |---|---|---|
-| **Host sync / transport** | The kernel has `hostSync` and follows host tempo; MelGen uses it. ProgGenie and SwiftSerpe declare the parameter and it works, but no UI surfaces it. SwiftPitchFold and SwiftDrawnQurve have no transport at all. SwiftMIDIcurator is the first to put play and host sync on screen, which is what the shared row should look like | **Build** — in `Shell`. A shared transport row (play, host sync, direction) that a plug-in opts into is one control, once. SwiftDrawnQurve needs it most: a looping gesture plug-in a host cannot start is a real limitation |
-| **Theme choice** | Every plug-in reads `colorScheme` from the environment. `MelGenTheme` has `.light` and `.dark` and no way to choose | **Build** — in `UI`. An AUv3 lives inside somebody else's window and does not always inherit the scheme its author intended. The JUCE DrawnQurve has an explicit Light/Dark switch for exactly this reason |
+| **Host sync / transport** | ~~No shared row~~ **Built on `features`.** `UI.TransportRow` plus `AUHost.TransportParameters` — declared once, found by address, opted into per plug-in. SwiftDrawnQurve's loop is host-startable at last; ProgGenie and SwiftSerpe now show the three parameters they always declared | **Done on `features`.** Still to land on `main` |
+| **Theme choice** | ~~No plug-in can override the host~~ **Built on `features`** as `UI.ThemePreference` — which turned out to be a *promotion*: MelGen had exactly this type in its app the whole time, and this register listed it as a gap nobody had closed | **Done on `features`** |
+| **MIDI panic** | ~~Nothing sends all-notes-off~~ **Built on `features`.** `PluginAudioUnit.panic()` releases what the kernel holds — the transform half using the mapping each note actually used — then all-sound-off and all-notes-off on sixteen channels. `InstrumentAudioUnit.panic()` is the synth's, which needs no MIDI at all | **Done on `features`** |
 | **Presets / factory content** | No plug-in ships presets. `fullState` round-trips a session, so the mechanism exists; nothing populates it | **Decide.** MelGen has `SetupStore`; the others have nothing. Whether a quantizer wants presets is a real question, not an oversight |
-| **MIDI panic** | Nothing sends all-notes-off. The kernel releases what *it* is holding when stopped, per plug-in; nothing clears a host's stuck notes | **Build** — in `Shell`, cheap, and the kernel already tracks held notes for two of its three jobs |
 | **Inline help** | None. The JUCE builds have a `?` overlay | **Decide.** These interfaces are small enough that the copy on screen may be the help; that is the argument MelGen's design brief already makes |
 | **Undo** | None anywhere | **Won't**, for now. A plug-in's undo has to agree with a host's, and getting that wrong is worse than not having it |
 | **Accessibility beyond labels** | Every control has a label, value and hint; nothing has been tested with VoiceOver on a device | **Decide** — but this is the one on the list whose absence is least defensible, and it is cheap to start |
@@ -115,7 +115,7 @@ heard on a device.
 | Voice modes — mono-merge, poly-spread, chordize, voice-split | **Decide, and not soon.** Three of the four emit *more* notes than they receive, which the kernel's transform cannot do: one note in, one note out. A second capability, not a missing switch |
 | Time quantization — delaying notes onto a grid | **Decide.** Needs a render-thread delay buffer, which is a third thing to get right in the render block |
 | Performance pads | **Won't.** The JUCE build's pads are a chord-launching surface; this plug-in folds what you play, and a pad that plays for you is a different product |
-| Host-automatable fold on/off | **Build**, with the shared transport row |
+| Host-automatable fold on/off | **Build.** The shared transport row landed on `features` and this is not part of it — bypass is not transport, and it wants a parameter address of its own |
 
 ### SwiftDrawnQurve — `aumi DrwQ`
 
@@ -123,8 +123,8 @@ heard on a device.
 
 | Gap | Intent |
 |---|---|
-| Run/stop is a UI button, not a parameter | **Build** — the most-wanted item on this page. See shared transport |
-| X/Y grid quantization ("qurve quantization") — snap the playhead to tick columns, or the value to grid rows | **Build.** It is the JUCE build's most distinctive control and it is cheap: both are arithmetic on a phase and a value, both fit in the render block beside the smoothing that is already there |
+| ~~Run/stop is a UI button, not a parameter~~ | **Done on `features`.** It was the most-wanted item on this page: a looping gesture plug-in you have to start by hand every time is one you stop reaching for |
+| ~~X/Y grid quantization ("qurve quantization")~~ | **Done on `features`.** Steps snaps the playhead to columns, Levels snaps the value to rows — two instruments rather than one control with two axes. Floor not round, N levels not N intervals, and before the smoother not after; each of those three has a failure mode behind it |
 | One curve per lane; the JUCE engine holds four "qurves" per lane so a note lane sounds polyphonically | **Decide.** Four lanes × four curves is sixteen playheads and a UI problem; four drawn lanes each with a pressure companion is already eight |
 | Per-lane speed and direction, tempo sync | **Build**, with the shared transport. A curve currently loops on its own recorded duration and nothing else |
 | Teach / CC-learn | **Decide.** Genuinely useful, and it needs the capture ring the kernel already has |

@@ -18,6 +18,19 @@
 //  plug-in that stops following the host the first time somebody looks at the
 //  control.
 //
+//  ── This is a promotion, not an invention ──────────────────────────────────
+//
+//  MelGen had exactly this as `MelGenAppearance` — same three cases, same
+//  labels, same symbols — sitting in the app where nothing else could reach it.
+//  The register listed "theme choice" as a shared gap without noticing that one
+//  plug-in had already closed it, and the first version of this file rewrote it
+//  from scratch.
+//
+//  The raw values are the same three strings, so `MelGenAppearance` is a
+//  typealias for this now and every session MelGen has ever saved still decodes.
+//  That is what the promotion path in CLAUDE.md is supposed to look like, and it
+//  is worth recording that it took reinventing the type to notice it existed.
+//
 
 import SwiftUI
 

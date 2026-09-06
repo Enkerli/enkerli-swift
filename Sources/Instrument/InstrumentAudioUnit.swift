@@ -84,6 +84,14 @@ open class InstrumentAudioUnit: AUAudioUnit, ParameterTreeHosting, @unchecked Se
     // matters: this instrument's whole subject is a continuous gesture, and an
     // interface that could not show it would be describing something else.
 
+    /// Silences the voice.
+    ///
+    /// The mirror of `PluginAudioUnit.panic`, and it needs no MIDI at all: a
+    /// synth *is* the downstream instrument, so there is nobody to send an
+    /// all-notes-off to. Everything a note leaves behind is dropped and the
+    /// parameters are untouched — panic is "stop", not "forget".
+    public func panic() { kernel.requestPanic() }
+
     public var currentBreath: Float { kernel.currentBreath() }
     public var isSounding: Bool { kernel.isSounding() }
 

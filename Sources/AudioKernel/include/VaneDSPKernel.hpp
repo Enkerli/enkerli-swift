@@ -118,6 +118,21 @@ public:
     void setBypass(bool bypassed) { mBypassed = bypassed; if (bypassed) { reset(); } }
     MIDIProtocolID AudioUnitMIDIProtocol() const { return kMIDIProtocol_2_0; }
 
+    /// Silences the voice on the next block.
+    ///
+    /// A synth's stuck note is the same bug as a MIDI processor's and worse in
+    /// one way: there is no downstream instrument to send an all-notes-off to,
+    /// so nothing outside this kernel can stop it. A held-note stack that got
+    /// out of step — a note-on whose note-off was filtered by a host, say —
+    /// would otherwise sound until the plug-in was removed.
+    ///
+    /// A flag rather than a direct reset, for the same reason the MIDI kernel
+    /// uses one: whoever calls this is the UI, and the UI does not own the
+    /// render thread's state.
+    void requestPanic() {
+        mShared.panicRequested.store(true, std::memory_order_release);
+    }
+
     // MARK: - What the UI may look at
     //
     // Two readings, both atomic, both written by the render thread and never
@@ -304,6 +319,15 @@ public:
                  AUAudioFrameCount frameCount) {
         if (buffers == nullptr || frameCount == 0) { return; }
 
+        if (mShared.panicRequested.exchange(false, std::memory_order_acq_rel)) {
+            // Everything a note leaves behind: the stack, the envelope, the
+            // gain. Not the parameters — panic is "stop", not "forget".
+            mHeldCount = 0;
+            mEnvelope.reset();
+            mGain = 0.0f;
+            mBreathSmoothed = 0.0f;
+        }
+
         if (mBypassed) { writeSilence(buffers, startFrame, frameCount); return; }
 
         // Block-rate: the envelope, the resonance coefficient, and the targets
@@ -418,14 +442,17 @@ private:
     struct SharedFields {
         std::atomic<float> breath{0.0f};
         std::atomic<bool> sounding{false};
+        std::atomic<bool> panicRequested{false};
 
         SharedFields() {}
         SharedFields(const SharedFields &other)
         : breath{other.breath.load(std::memory_order_relaxed)},
-          sounding{other.sounding.load(std::memory_order_relaxed)} {}
+          sounding{other.sounding.load(std::memory_order_relaxed)},
+          panicRequested{other.panicRequested.load(std::memory_order_relaxed)} {}
         SharedFields &operator=(const SharedFields &other) {
             breath.store(other.breath.load(std::memory_order_relaxed), std::memory_order_relaxed);
             sounding.store(other.sounding.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            panicRequested.store(other.panicRequested.load(std::memory_order_relaxed), std::memory_order_relaxed);
             return *this;
         }
     };

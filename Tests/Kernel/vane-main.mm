@@ -649,6 +649,41 @@ int main() {
               peakOf(secondHalf) > 0.0f, "peak " + number(peakOf(secondHalf)));
     }
 
+    // ── panic ──────────────────────────────────────────────────────────────
+    //
+    // A synth's stuck note is worse than a MIDI processor's in one way: there is
+    // no downstream instrument to send an all-notes-off to, so nothing outside
+    // this kernel can stop it.
+    {
+        VaneDSPKernel kernel = makeKernel();
+        feed(kernel, noteWord(0xB, 0, 2, 127));
+        feed(kernel, noteWord(0x9, 0, 60, 100));
+        std::vector<float> sounding = renderContinuous(kernel, 20, 256);
+        check("something is sounding to begin with", peakOf(sounding) > 0.05f,
+              "peak " + number(peakOf(sounding)));
+
+        kernel.requestPanic();
+        std::vector<float> after = renderContinuous(kernel, 20, 256);
+        check("panic silences it even with the breath still up",
+              peakOf({ after.end() - 512, after.end() }) < 0.001f,
+              "tail peak " + number(peakOf({ after.end() - 512, after.end() }), 6));
+        check("and the voice is released rather than merely quiet",
+              !kernel.isSounding());
+
+        // Parameters are untouched: panic is "stop", not "forget". A panic that
+        // reset the patch would be a control nobody dares press.
+        check("the patch survives", kernel.getParameter(vaneMorph) == 0.35f
+              && kernel.getParameter(vaneLevel) == 0.8f,
+              "morph " + number(kernel.getParameter(vaneMorph)));
+
+        // And it can play again immediately — a panic that left the kernel in a
+        // state where the next note was silent would be worse than the bug.
+        feed(kernel, noteWord(0x9, 0, 62, 100));
+        std::vector<float> again = renderContinuous(kernel, 30, 256);
+        check("and the next note plays normally", peakOf(again) > 0.05f,
+              "peak " + number(peakOf(again)));
+    }
+
     printf("\n%s\n", gFailures == 0 ? "vane: OK" : "vane: FAILURES");
     return gFailures == 0 ? 0 : 1;
 }
