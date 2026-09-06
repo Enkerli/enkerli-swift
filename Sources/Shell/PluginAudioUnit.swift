@@ -91,14 +91,19 @@ open class PluginAudioUnit: AUAudioUnit, @unchecked Sendable
 
     /// How many complete loop passes have played. The UI polls this to decide
     /// when to generate the next take.
-    // MARK: - SysEx
+    // MARK: - Talking to a device
 
     /// How far the UI has read into the kernel's inbound SysEx ring.
     private var sysExCursor: UInt64 = 0
 
-    /// Sends a burst of SysEx frames, once.
+    /// Sends a burst of messages, once.
     ///
-    /// Each frame includes its own `F0` and `F7`, because that is how every
+    /// A burst is not only SysEx, because talking to a device rarely is: the RND
+    /// takes its seed over SysEx, its scale over CC9 and its tonic as a *note*.
+    /// A message starting with `F0` is a SysEx frame; anything else is a short
+    /// channel message sent verbatim. One buffer rather than three mechanisms.
+    ///
+    /// A SysEx frame includes its own `F0` and `F7`, because that is how every
     /// device protocol document in this suite is written. The kernel strips them
     /// on the way into UMP and puts them back on the way out, so nothing above
     /// this line has to know that MIDI 2.0 removed the framing bytes.
@@ -107,12 +112,12 @@ open class PluginAudioUnit: AUAudioUnit, @unchecked Sendable
     /// block. Sending the same bytes again means calling this again — which is
     /// what makes it possible to tell *this* burst's answer from the last one's.
     ///
-    /// - Returns: the frames that were refused, if any. A frame is refused when
-    ///   it is longer than the kernel's slot or when the burst is full. Refusing
-    ///   is deliberate: a SysEx frame that is silently truncated is precisely
-    ///   the failure this whole path exists to detect.
+    /// - Returns: the messages that were refused, if any. One is refused when it
+    ///   is longer than the kernel's slot or when the burst is full. Refusing is
+    ///   deliberate: a SysEx frame that is silently truncated is precisely the
+    ///   failure this whole path exists to detect.
     @discardableResult
-    public func sendSysEx(_ frames: [[UInt8]]) -> [[UInt8]] {
+    public func sendBurst(_ frames: [[UInt8]]) -> [[UInt8]] {
         kernel.beginSysExBurst()
         var refused: [[UInt8]] = []
         for frame in frames {

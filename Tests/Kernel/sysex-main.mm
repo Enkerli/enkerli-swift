@@ -40,9 +40,10 @@
 
 static std::vector<std::vector<uint8_t>> gFrames;
 static std::vector<uint32_t> gStatuses;
+static std::vector<std::vector<uint8_t>> gShort;
 static int gNonSysExWords = 0;
 
-static void resetSent() { gFrames.clear(); gStatuses.clear(); gNonSysExWords = 0; }
+static void resetSent() { gFrames.clear(); gStatuses.clear(); gShort.clear(); gNonSysExWords = 0; }
 
 static AUMIDIEventListBlock recordingBlock() {
     return ^(AUEventSampleTime, uint8_t, const MIDIEventList *list) {
@@ -53,7 +54,15 @@ static AUMIDIEventListBlock recordingBlock() {
             for (uint32_t w = 0; w < packet->wordCount; ++w) {
                 const uint32_t first = packet->words[w];
                 const uint8_t type = (uint8_t)((first >> 28) & 0xF);
-                if (type != 0x3) { gNonSysExWords += 1; continue; }
+                if (type != 0x3) {
+                    gNonSysExWords += 1;
+                    if (type == 0x2) {
+                        gShort.push_back({ (uint8_t)(((first >> 20) & 0xF) << 4 | ((first >> 16) & 0xF)),
+                                           (uint8_t)((first >> 8) & 0x7F),
+                                           (uint8_t)(first & 0x7F) });
+                    }
+                    continue;
+                }
                 if (w + 1 >= packet->wordCount) { break; }
                 const uint32_t second = packet->words[w + 1];
                 const uint8_t status = (uint8_t)((first >> 20) & 0xF);
@@ -342,6 +351,39 @@ int main() {
         check("an over-long frame still arrives", kernel.sysExInCount() == 1);
         check("and is flagged as truncated rather than passed off as complete",
               kernel.sysExInTruncated() == 1, std::to_string(kernel.sysExInTruncated()));
+    }
+
+    // ── out: a burst is not only SysEx ─────────────────────────────────────
+    //
+    // The RND takes its seed over SysEx, its scale over CC9 and its tonic as a
+    // note. One buffer that dispatches on the status byte, rather than three
+    // mechanisms to get right.
+    {
+        PluginDSPKernel kernel;
+        kernel.initialize(48000);
+        kernel.setMIDIOutputEventBlock(recordingBlock());
+        resetSent();
+
+        const std::vector<uint8_t> cc { 0xB0, 9, 99 };          // CC9 = 99, ch 1
+        const std::vector<uint8_t> noteOn { 0x90, 62, 100 };    // D4 on, ch 1
+        const auto seed = seedFrame(0xAA442CE7);
+        kernel.beginSysExBurst();
+        kernel.addSysExFrame(cc.data(), (uint32_t)cc.size());
+        kernel.addSysExFrame(noteOn.data(), (uint32_t)noteOn.size());
+        kernel.addSysExFrame(seed.data(), (uint32_t)seed.size());
+        kernel.commitSysExBurst();
+        kernel.process(0, 512);
+
+        check("a channel message in a burst goes out as a channel message",
+              gNonSysExWords == 2, std::to_string(gNonSysExWords) + " short messages");
+        check("beside the SysEx, in the same burst", gFrames.size() == 1
+              && gFrames[0] == framePayload(seed),
+              gFrames.empty() ? "no SysEx came out" : hex(gFrames[0]));
+        check("and the channel bytes are not reinterpreted on the way",
+              gShort.size() == 2
+              && gShort[0][0] == 0xB0 && gShort[0][1] == 9 && gShort[0][2] == 99
+              && gShort[1][0] == 0x90 && gShort[1][1] == 62 && gShort[1][2] == 100,
+              gShort.empty() ? "nothing" : hex(gShort[0]));
     }
 
     printf("\n%s\n", gFailures == 0 ? "sysex: OK" : "sysex: FAILURES");

@@ -1129,11 +1129,39 @@ public:
         mSysExSent = committed;
         const SysExBurst &burst = mSysExOut[committed & 1];
         for (uint32_t index = 0; index < burst.count; ++index) {
-            sendSysExFrame(sampleTime, burst.frames[index]);
+            sendBurstMessage(sampleTime, burst.frames[index]);
         }
     }
 
-    /// One frame out, as SysEx7 packets of at most six data bytes.
+    /// One message out of a burst.
+    ///
+    /// A burst carries whatever a device needs to be told, and for a device that
+    /// is rarely only SysEx: the RND takes its seed over SysEx, its scale over
+    /// CC9, and its tonic as a *note*. Three mechanisms for three message types
+    /// would have been three things to get right; one buffer that dispatches on
+    /// the status byte is one.
+    ///
+    /// So: leading 0xF0 means SysEx7, anything else is a short MIDI 1.0 message
+    /// sent verbatim. Nothing here interprets a channel message beyond its
+    /// length — the whole contract of a burst is that the bytes decided
+    /// off-thread are the bytes that go out.
+    void sendBurstMessage(AUEventSampleTime sampleTime, const SysExFrame &frame) {
+        if (frame.length == 0) { return; }
+        if (frame.bytes[0] != 0xF0) { sendShortMessage(sampleTime, frame); return; }
+        sendSysExFrame(sampleTime, frame);
+    }
+
+    /// A two- or three-byte channel message, as one UMP word.
+    void sendShortMessage(AUEventSampleTime sampleTime, const SysExFrame &frame) {
+        if (frame.length < 2) { return; }
+        const uint8_t status = (uint8_t)((frame.bytes[0] >> 4) & 0xF);
+        const uint8_t channel = (uint8_t)(frame.bytes[0] & 0xF);
+        const uint8_t data1 = frame.bytes[1];
+        const uint8_t data2 = frame.length > 2 ? frame.bytes[2] : 0;
+        sendMIDI1(sampleTime, status, channel, data1, data2);
+    }
+
+    /// One SysEx frame out, as SysEx7 packets of at most six data bytes.
     ///
     /// The F0 and F7 the caller supplied are stripped again here, for the reason
     /// given above `captureSysEx`: they are MIDI 1.0 framing, and UMP carries

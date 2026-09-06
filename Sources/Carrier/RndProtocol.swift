@@ -317,6 +317,97 @@ public enum RND {
     }
 }
 
+// MARK: - Commands
+
+/// Every outbound action as plain MIDI bytes.
+///
+/// Ported from `rnd-companion`'s `RndCommands`, which exists because there are
+/// two ways to reach the device and they need identical bytes — the plug-in's
+/// host stream, or a port the app opens itself. Building the messages in one
+/// place is what keeps "send a seed" meaning the same thing in both.
+///
+/// Everything is a `[UInt8]` that `PluginAudioUnit.sendBurst` accepts directly:
+/// a leading `F0` is a SysEx frame, anything else a short channel message. The
+/// device needs all three kinds — seed over SysEx, scale over CC, tonic as a
+/// note — which is why the burst carries messages rather than only SysEx.
+///
+/// Channel numbers here are **1-based**, as MIDI channels are spoken about, and
+/// converted at the one place that builds a status byte.
+public enum RndCommand {
+
+    /// A status byte from a 1-based channel.
+    private static func status(_ kind: UInt8, channel: Int) -> UInt8 {
+        (kind << 4) | UInt8((max(1, channel) - 1) & 0x0F)
+    }
+
+    public static func controlChange(channel: Int, controller: UInt8, value: Int) -> [UInt8] {
+        [status(0xB, channel: channel), controller & 0x7F, UInt8(max(0, min(127, value)))]
+    }
+
+    public static func noteOn(channel: Int, note: Int, velocity: Int = 100) -> [UInt8] {
+        [status(0x9, channel: channel), UInt8(max(0, min(127, note))),
+         UInt8(max(0, min(127, velocity)))]
+    }
+
+    public static func noteOff(channel: Int, note: Int) -> [UInt8] {
+        [status(0x8, channel: channel), UInt8(max(0, min(127, note))), 0]
+    }
+
+    /// Loads a seed.
+    public static func seed(_ value: UInt32) -> [[UInt8]] {
+        [RND.seedMessage(value)]
+    }
+
+    /// Clears the play-lock and asks for a dump. **Audible: a brief mute.**
+    /// Drive it from an explicit user action, never from a timer.
+    public static func unlockAndDump() -> [[UInt8]] {
+        [RND.unlockAndDump()]
+    }
+
+    /// Selects a scale band on CC9. Locks on the hardware — see
+    /// `RND.scaleAndTonicLockOnDevice`.
+    public static func scale(_ scaleIndex: Int) -> [[UInt8]] {
+        [controlChange(channel: RND.masterChannel,
+                       controller: RND.CC.scale,
+                       value: Int(RND.scaleCCValue(scaleIndex)))]
+    }
+
+    /// Pulses a note on channel 1. Also locks.
+    ///
+    /// The note-off is a *separate message in the same burst*, which is a
+    /// difference from the JUCE version worth naming: that one carried a
+    /// millisecond delay per message and a transport that honoured it. Here both
+    /// messages leave in the same render block, so the pulse is as short as a
+    /// buffer. Whether the device needs a longer gate is unknown and untested —
+    /// if it turns out to, that is a delay the burst does not currently express.
+    public static func tonic(_ pitchClass: Int) -> [[UInt8]] {
+        let note = RND.tonicNote(pitchClass)
+        return [noteOn(channel: RND.masterChannel, note: note),
+                noteOff(channel: RND.masterChannel, note: note)]
+    }
+
+    /// Volume and reverb go to the master plus the per-track takeover band.
+    private static func mix(_ controller: UInt8, _ value: Int) -> [[UInt8]] {
+        (1...(1 + RND.maxTracks)).map {
+            controlChange(channel: $0, controller: controller, value: value)
+        }
+    }
+
+    public static func volume(_ value: Int) -> [[UInt8]] { mix(RND.CC.volume, value) }
+    public static func reverb(_ value: Int) -> [[UInt8]] { mix(RND.CC.reverb, value) }
+
+    /// One track's own volume, on its own channel.
+    ///
+    /// Muting is value 0; there is no separate mute message because the device
+    /// does not need one. This is what makes a track auditionable, and it was in
+    /// the protocol long before anything exposed it.
+    public static func trackVolume(_ trackIndex: Int, _ value: Int) -> [[UInt8]] {
+        guard trackIndex >= 0 && trackIndex < RND.maxTracks else { return [] }
+        return [controlChange(channel: RND.trackChannel(trackIndex),
+                              controller: RND.CC.volume, value: value)]
+    }
+}
+
 // MARK: - Accumulated device state
 
 /// Everything the device has told us about what it is currently playing.

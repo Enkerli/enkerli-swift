@@ -198,3 +198,81 @@ private let trackEngineFrame: [UInt8] =
     #expect(status.engines.isEmpty)
     #expect(status.tempoBPM == 125, "but what the globals said is still what they said")
 }
+
+// MARK: - The command layer
+
+@Test func channelNumbersAreOneBasedOnTheWayInAndZeroBasedOnTheWire() {
+    // The one place a status byte is built, and the one place this can go wrong.
+    // Channel 1 is nibble 0; getting it backwards sends everything to the wrong
+    // voice, which on this device means the wrong track.
+    #expect(RndCommand.controlChange(channel: 1, controller: 9, value: 99) == [0xB0, 9, 99])
+    #expect(RndCommand.controlChange(channel: 5, controller: 7, value: 0) == [0xB4, 7, 0])
+    #expect(RndCommand.noteOn(channel: 1, note: 60, velocity: 100) == [0x90, 60, 100])
+    #expect(RndCommand.noteOff(channel: 1, note: 60) == [0x80, 60, 0])
+}
+
+@Test func controlValuesAreClampedRatherThanWrapped() {
+    // A value above 127 masked into seven bits becomes a small number, which is
+    // the opposite of what "louder" meant.
+    #expect(RndCommand.controlChange(channel: 1, controller: 7, value: 200)[2] == 127)
+    #expect(RndCommand.controlChange(channel: 1, controller: 7, value: -5)[2] == 0)
+}
+
+@Test func aSeedCommandIsTheProtocolFrame() {
+    #expect(RndCommand.seed(capturedSeed) == [capturedSeedFrame])
+    #expect(RndCommand.unlockAndDump() == [RND.unlockAndDump()])
+}
+
+@Test func scaleGoesToTheBandMidpointOnCC9() {
+    let command = RndCommand.scale(6)
+    #expect(command.count == 1)
+    #expect(command[0][0] == 0xB0, "master channel")
+    #expect(command[0][1] == RND.CC.scale)
+    #expect(command[0][2] == RND.scaleCCValue(6))
+    #expect(RND.scaleIndex(forCC: command[0][2]) == 6, "and selects the band it names")
+}
+
+@Test func tonicIsANotePulseWithItsOwnRelease() {
+    let command = RndCommand.tonic(2)
+    #expect(command.count == 2, "a note-on and its note-off")
+    #expect(command[0] == [0x90, 62, 100])
+    #expect(command[1] == [0x80, 62, 0])
+    // Left sounding is the failure worth naming: this device is not a synth we
+    // control, and a note we never released is a note nobody can release.
+    #expect(command[1][0] & 0xF0 == 0x80)
+}
+
+@Test func mixControlsReachTheMasterAndEveryTrack() {
+    let volume = RndCommand.volume(64)
+    #expect(volume.count == 5, "master plus four tracks")
+    #expect(volume.map { $0[0] } == [0xB0, 0xB1, 0xB2, 0xB3, 0xB4])
+    #expect(volume.allSatisfy { $0[1] == RND.CC.volume && $0[2] == 64 })
+    #expect(RndCommand.reverb(10).allSatisfy { $0[1] == RND.CC.reverb })
+}
+
+@Test func aTrackHasItsOwnVolumeAndMutingIsZero() {
+    #expect(RndCommand.trackVolume(0, 0) == [[0xB1, RND.CC.volume, 0]])
+    #expect(RndCommand.trackVolume(3, 127) == [[0xB4, RND.CC.volume, 127]])
+    #expect(RndCommand.trackVolume(4, 64).isEmpty, "there are four tracks")
+    #expect(RndCommand.trackVolume(-1, 64).isEmpty)
+}
+
+@Test func everyCommandIsSomethingTheBurstCanCarry() {
+    // The burst dispatches on the first byte: F0 is SysEx, anything else a
+    // short channel message of two or three bytes. A command that was neither
+    // would be dropped silently by the kernel.
+    let all = RndCommand.seed(1) + RndCommand.unlockAndDump() + RndCommand.scale(3)
+            + RndCommand.tonic(5) + RndCommand.volume(64) + RndCommand.trackVolume(2, 0)
+    for message in all {
+        if message.first == 0xF0 {
+            #expect(message.last == 0xF7, "a SysEx frame is terminated")
+            #expect(message.dropFirst().dropLast().allSatisfy { $0 & 0x80 == 0 },
+                    "and carries no status byte in its body")
+        } else {
+            #expect(message.count == 2 || message.count == 3, "\(message.count) bytes")
+            #expect(message[0] & 0x80 != 0, "a channel message starts with a status byte")
+            #expect(message.dropFirst().allSatisfy { $0 & 0x80 == 0 },
+                    "and its data bytes are seven-bit")
+        }
+    }
+}
