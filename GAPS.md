@@ -302,6 +302,33 @@ amended accordingly.
 
 ---
 
+## Where the build-back happens
+
+**`main` is the MVP. `features` is where these gaps get closed.**
+
+Every plug-in repo depends on this package *by path*, so there is one copy of
+the foundation on disk and whichever branch it is on is what every plug-in
+compiles against. The branch is therefore a property of the **suite**, not of a
+repo, and `Scripts/branches.sh` switches all eleven checkouts together:
+
+```bash
+Scripts/branches.sh              # what is everything on?
+Scripts/branches.sh features     # switch, creating where needed
+Scripts/branches.sh main         # back to the version that gets played
+```
+
+That is also why there is one `features` branch per repo rather than a branch
+per feature: a per-feature branch would need a matching package branch to build
+against, and the coordination cost would land on whoever is trying to *hear* a
+plug-in rather than on whoever wrote the feature.
+
+The split is what makes both halves honest. Every claim in a README is about
+`main` and is meant to stay true; a claim on `features` is only as good as the
+last run. When something on `features` earns its place, it lands on `main` and
+its row here changes from **build** to done.
+
+---
+
 ## The strategy, in four rules
 
 **1. Shared gaps get built in the package, once.** Two of the seven above are
