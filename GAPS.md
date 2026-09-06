@@ -151,6 +151,23 @@ foundation — and almost no shell.
 | Playback direction, which the kernel supports and this plug-in deliberately does not declare | **Won't.** A mark records what you heard; hearing a clip backwards and marking the forward one records a judgement of music that is not in the library |
 | Clips are matched as duplicates on pitch and start beat only. Two files that differ in tempo but not in notes are one clip | **Decide.** Probably right, and untested against a real folder of exports |
 
+### SwiftRndSysExProbe — `aumi SxPr`
+
+*Answers one question per host: does SysEx survive a plug-in, in and out?*
+
+Not a skateboard version of anything. It is a **diagnostic**, and the JUCE build
+is one too — the port is close to feature-complete because there was very little
+feature to port. What it gained is the shared kernel's SysEx path and its
+harness, which is the half that can be wrong silently.
+
+| Gap | Intent |
+|---|---|
+| No direct MIDI port. The JUCE probe and companion can open the device themselves, bypassing host routing entirely — which is the only thing that works in Logic and Bitwig | **Decide**, and it is the biggest question on this page. An AUv3 opening its own CoreMIDI port is legal and is also a plug-in doing something a host cannot see |
+| No copy-to-clipboard for the report. `ProbeState.report` builds the text and nothing offers it | **Build**, trivially, and it matters more than its size — the output of a diagnostic that cannot be pasted into a bug report mostly does not leave the screen |
+| Per-host results are not recorded anywhere in the plug-in; `rnd-companion/docs/SYSEX_PASSTHROUGH.md` is the register | **Won't.** A measurement is about a host and a version, and a plug-in is the wrong place to accumulate that |
+| The probe cannot distinguish "the host dropped our output" from "nothing is attached" | **Won't** — it is not a limitation, it is the truth, and the verdict says so in as many words. Anything else would be a green light that means nothing |
+| No timestamps in the traffic log beyond arrival order | **Decide.** Ordering is what matters for framing bugs; latency would be a different instrument |
+
 ---
 
 ## The strategy, in four rules
