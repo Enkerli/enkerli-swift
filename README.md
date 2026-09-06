@@ -109,6 +109,19 @@ The chord dictionary and the progression tables are generated rather than tested
 in the [MelGen](https://github.com/Enkerli/MelGen) repo and write into
 `Sources/Theory/` here.
 
+## What the plug-ins do not do yet
+
+[GAPS.md](GAPS.md) is the register: what is missing from every Swift plug-in,
+what is missing from each one, and — the part that keeps it from being a list of
+everything the JUCE builds do — what we have decided **not** to build. Each Swift
+plug-in is deliberately a skateboard to its counterpart's car, and the strategy
+for growing one without growing the other's accumulation is written down there
+rather than assumed.
+
+`Scripts/check-gaps.sh` fails when a plug-in beside this checkout has no section
+in it. It cannot check that a gap list is true; it can check that one exists,
+which is the failure that file is most likely to have.
+
 ## About `public` here, and about the history
 
 Two things a reader deserves up front.
