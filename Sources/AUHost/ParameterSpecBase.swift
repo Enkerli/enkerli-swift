@@ -34,6 +34,19 @@ public struct ParameterGroupSpec: NodeSpec {
         self.name = name
         self.children = children()
     }
+
+    /// From a list rather than a builder.
+    ///
+    /// The result builder deliberately supports no control flow — it takes
+    /// nodes, not arrays — and teaching it `buildArray` would change how every
+    /// existing tree in the suite type-checks for the sake of one caller. A
+    /// second initialiser costs three lines and changes nothing that already
+    /// works. `TransportParameters.group` is the caller.
+    public init(identifier: String, name: String, children: [NodeSpec]) {
+        self.identifier = ParameterGroupSpec.validateID(identifier)
+        self.name = name
+        self.children = children
+    }
 }
 
 public struct ParameterTreeSpec: NodeSpec {

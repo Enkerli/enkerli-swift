@@ -68,7 +68,19 @@ public enum TransportParameters {
         public static let audition: Options = [.play, .hostSync]
     }
 
-    /// The specs, ready to drop into a `ParameterGroupSpec`.
+    /// The three as a group a plug-in can drop straight into its tree.
+    ///
+    /// A group rather than three loose specs, for two reasons. A host displays
+    /// groups, and "Transport: Play, Direction, Sync to Host" reads better than
+    /// three controls scattered among a plug-in's own knobs. And the parameter
+    /// DSL's result builder takes nodes rather than arrays, so a group is the
+    /// one shape that drops in without teaching the builder about loops.
+    public static func group(_ options: Options = .loop) -> ParameterGroupSpec {
+        ParameterGroupSpec(identifier: "transport", name: "Transport",
+                           children: specs(options))
+    }
+
+    /// The specs, for a plug-in that wants them somewhere of its own.
     public static func specs(_ options: Options = .loop) -> [ParameterSpec] {
         var specs: [ParameterSpec] = []
         if options.contains(.play) {

@@ -293,10 +293,27 @@ open class PluginAudioUnit: AUAudioUnit, ParameterTreeHosting, @unchecked Sendab
 		setupParameterCallbacks()
 	}
 
+    /// Called whenever a parameter changes, after the kernel has been told.
+    ///
+    /// A hook rather than an overridable `setupParameterTree`, because a
+    /// subclass that had to re-install the callbacks would have to reproduce
+    /// all three of them correctly to add one line — and the one it forgot
+    /// would be the string formatter, which fails silently in a host's
+    /// automation lane.
+    ///
+    /// Exists because a parameter can mean something to a plug-in that the
+    /// kernel does not act on. SwiftDrawnQurve's Play is the case: the kernel
+    /// reads `playMelody` in `processMelody`, which a curve plug-in never uses,
+    /// so the plug-in mirrors it into the curve engine here. Without this the
+    /// control would work only while the interface was open, which is the worst
+    /// kind of working.
+    open func parameterDidChange(_ address: AUParameterAddress, _ value: AUValue) {}
+
 	private func setupParameterCallbacks() {
 		// implementorValueObserver is called when a parameter changes value.
 		parameterTree?.implementorValueObserver = { [weak self] param, value -> Void in
             self?.kernel.setParameter(param.address, value)
+            self?.parameterDidChange(param.address, value)
 		}
 
 		// implementorValueProvider is called when the value needs to be refreshed.
