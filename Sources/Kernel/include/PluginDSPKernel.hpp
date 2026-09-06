@@ -386,7 +386,16 @@ public:
     // synth can act on and no host can display, and at 48 kHz it is 48,000
     // control changes a second for a curve nobody can hear moving that fast.
 
-    static constexpr uint32_t kMaxCurveLanes = 4;
+    /// Eight, because a drawn lane can carry two curves.
+    ///
+    /// It was four, matching DrawnQurve's `kMaxLanes`. Apple Pencil reports
+    /// pressure alongside position, and a stroke that carries it produces two
+    /// curves from one gesture — the line you drew and how hard you pressed
+    /// while drawing it. A plug-in pairs them, so four drawn lanes want eight
+    /// here. The array is 8 x (256 floats + a few fields), about 8 KB per
+    /// buffer and 16 KB double-buffered, which is not a number worth
+    /// economising on.
+    static constexpr uint32_t kMaxCurveLanes = 8;
     static constexpr uint32_t kCurveTableSize = 256;
 
     enum class CurveMessage : uint8_t {

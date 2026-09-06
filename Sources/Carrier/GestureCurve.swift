@@ -133,6 +133,73 @@ public struct GestureCurve: Codable, Hashable, Sendable {
 
     // MARK: - Drawing one
 
+    /// One sample of a gesture: where the pen was, and how hard it pressed.
+    ///
+    /// `pressure` is normalised 0…1 and is nil where the input has none — a
+    /// finger on a screen that does not report force, a mouse, a trackpad. Nil
+    /// rather than 0.5 or 1, because "no pressure information" and "pressed
+    /// halfway" are different facts and a curve built from the second when the
+    /// first is true is a curve nobody drew.
+    public struct StrokeSample: Hashable, Sendable {
+        public var x: Double
+        public var y: Double
+        public var pressure: Double?
+
+        public init(x: Double, y: Double, pressure: Double? = nil) {
+            self.x = x
+            self.y = y
+            self.pressure = pressure
+        }
+    }
+
+    /// The two curves a pressure-carrying stroke produces.
+    public struct StrokePair: Hashable, Sendable {
+        /// Where the pen was — the line you drew.
+        public var position: GestureCurve
+        /// How hard it pressed while drawing it. Nil when the input reported
+        /// none, which is most inputs.
+        public var pressure: GestureCurve?
+
+        public init(position: GestureCurve, pressure: GestureCurve? = nil) {
+            self.position = position
+            self.pressure = pressure
+        }
+    }
+
+    /// Resamples a stroke into one or two curves.
+    ///
+    /// One gesture, two things recorded: the line, and the pressure along it.
+    /// They share a duration and a time base by construction — sample *i* of
+    /// both is the same instant — which is the property that makes them worth
+    /// pairing rather than drawing twice. Two passes over the same surface
+    /// could never line up, and lining up is the whole point: a swell that
+    /// arrives exactly where the line peaks is a thing you can play and not a
+    /// thing you can edit into being.
+    ///
+    /// The pressure curve is produced only when the input reported pressure. A
+    /// stroke with none comes back with `pressure == nil` rather than with a
+    /// flat curve, so a caller can tell "this device has no pressure" from "I
+    /// pressed evenly".
+    public static func fromStroke(_ samples: [StrokeSample],
+                                  durationSeconds: Double = 1) -> StrokePair? {
+        let positions = samples.map { (x: $0.x, y: $0.y) }
+        guard let position = fromPoints(positions, durationSeconds: durationSeconds) else {
+            return nil
+        }
+        let withPressure = samples.compactMap { sample -> (x: Double, y: Double)? in
+            guard let pressure = sample.pressure else { return nil }
+            return (x: sample.x, y: pressure)
+        }
+        // Every sample or none: a stroke that started on a Pencil and continued
+        // under a finger would otherwise produce a pressure curve with invented
+        // stretches in it.
+        guard withPressure.count == samples.count, !withPressure.isEmpty else {
+            return StrokePair(position: position)
+        }
+        return StrokePair(position: position,
+                          pressure: fromPoints(withPressure, durationSeconds: durationSeconds))
+    }
+
     /// Resamples a drawn stroke into the fixed table.
     ///
     /// Points arrive at whatever rate a finger and a screen agree on — bunched
@@ -144,7 +211,7 @@ public struct GestureCurve: Codable, Hashable, Sendable {
     ///
     /// - Parameter points: `(x, y)` with x increasing, both normalised 0…1.
     ///   Out-of-order or duplicate x values are tolerated; y is clamped.
-    public static func fromStroke(_ points: [(x: Double, y: Double)],
+    public static func fromPoints(_ points: [(x: Double, y: Double)],
                                   durationSeconds: Double = 1) -> GestureCurve? {
         let cleaned = points
             .map { (x: min(1, max(0, $0.x)), y: min(1, max(0, $0.y))) }
