@@ -33,6 +33,7 @@ let package = Package(
         .library(name: "Theory", targets: ["Theory"]),
         .library(name: "Carrier", targets: ["Carrier"]),
         .library(name: "Kernel", targets: ["Kernel"]),
+        .library(name: "AUHost", targets: ["AUHost"]),
         .library(name: "Shell", targets: ["Shell"]),
         .library(name: "UI", targets: ["UI"]),
     ],
@@ -67,8 +68,20 @@ let package = Package(
         // by its directory rather than by what it named. The dependency was in
         // the name: play, direction and host sync are what a loop player has.
         .target(name: "Kernel"),
+
+        // The AU plumbing that is not about MIDI: the observable parameter
+        // tree, the spec DSL, and the view-controller lifecycle every AUv3 in
+        // this suite needs.
+        //
+        // Split out of `Shell` when the synth arrived. `Shell` is an `aumi`
+        // MIDI processor's half of an audio unit and an instrument cannot
+        // subclass it — but the lifecycle around it is identical, and it is the
+        // fiddly part. No C++ here, and no dependency on `Kernel`: this target
+        // is what an audio unit needs before it has decided what kind it is.
+        .target(name: "AUHost", swiftSettings: mode),
+
         .target(name: "Shell",
-                dependencies: ["Core", "Theory", "Carrier", "Kernel"],
+                dependencies: ["Core", "Theory", "Carrier", "Kernel", "AUHost"],
                 swiftSettings: mode + [.interoperabilityMode(.Cxx)]),
 
         // Conformance, not unit tests. The point of these is that a Swift

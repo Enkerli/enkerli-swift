@@ -14,10 +14,11 @@
 //
 
 import AVFoundation
+import AUHost
 import Kernel
 import Carrier
 
-open class PluginAudioUnit: AUAudioUnit, @unchecked Sendable
+open class PluginAudioUnit: AUAudioUnit, ParameterTreeHosting, @unchecked Sendable
 {
 	// C++ Objects
 	public var kernel = PluginDSPKernel()
