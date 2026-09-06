@@ -34,6 +34,8 @@ let package = Package(
         .library(name: "Carrier", targets: ["Carrier"]),
         .library(name: "Kernel", targets: ["Kernel"]),
         .library(name: "AUHost", targets: ["AUHost"]),
+        .library(name: "AudioKernel", targets: ["AudioKernel"]),
+        .library(name: "Instrument", targets: ["Instrument"]),
         .library(name: "Shell", targets: ["Shell"]),
         .library(name: "UI", targets: ["UI"]),
     ],
@@ -84,6 +86,34 @@ let package = Package(
                 dependencies: ["Core", "Theory", "Carrier", "Kernel", "AUHost"],
                 swiftSettings: mode + [.interoperabilityMode(.Cxx)]),
 
+        // The synth's render path. A sibling of `Kernel`, not a layer of it.
+        //
+        // This is the one target in the package that produces a *sample*.
+        // Everything else here deals in messages, and PORTING.md §8's "nothing
+        // generates on the audio thread" is a rule about that world: decide
+        // off-thread, look up on it. A synth inverts it by definition — its
+        // render block IS the work, and it must produce a number every sample
+        // whether or not anything has been decided.
+        //
+        // GAPS.md argued from that to "no synth on this foundation", and the
+        // decision went the other way. What survives the reversal is the shape:
+        // `Kernel` and `Shell` do not depend on this and never will, so a MIDI
+        // processor links not one line of it, and the separation is a dependency
+        // edge rather than a promise in a document.
+        .target(name: "AudioKernel"),
+
+        // An instrument's half of an audio unit: output busses, the render
+        // block, and the MIDI input a synth is played by.
+        //
+        // In the package rather than in the SwiftVane repo for one concrete
+        // reason: this is the Swift that touches C++, and `-cxx-interoperability-mode`
+        // is configured here. Doing it in an Xcode target would be new machinery
+        // no other repo in the suite uses. That is an engineering reason, not a
+        // purity one, and it is the same reason `Shell` exists.
+        .target(name: "Instrument",
+                dependencies: ["AUHost", "AudioKernel"],
+                swiftSettings: mode + [.interoperabilityMode(.Cxx)]),
+
         // Conformance, not unit tests. The point of these is that a Swift
         // answer and a TypeScript answer to the same question agree, so they
         // read `packages/theory/vectors/*.json` out of a sibling music-suite
@@ -93,5 +123,12 @@ let package = Package(
         .testTarget(name: "CarrierTests", dependencies: ["Carrier", "Theory"], swiftSettings: mode),
         .testTarget(name: "ShellTests", dependencies: ["Shell", "Theory"],
                     swiftSettings: mode + [.interoperabilityMode(.Cxx)]),
-    ]
+    ],
+    // `std::clamp` is C++17 and SwiftPM's default is older, so the synth's DSP
+    // did not compile until this was stated. Worth pinning rather than working
+    // around: `Scripts/check-kernel.sh` has always compiled the harnesses with
+    // `-std=c++20`, so without this line the kernels were being built to two
+    // different standards by the two things that build them — and the harness,
+    // the stricter of the two, is the one people trust.
+    cxxLanguageStandard: .cxx20
 )
