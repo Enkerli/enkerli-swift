@@ -1,7 +1,7 @@
 # What the Swift plug-ins do not do yet
 
-*A register, and a strategy for it. Written 2026-09-05, covering the seven
-plug-ins built on this package — and the two that are not. Kept here rather than
+*A register, and a strategy for it. Written 2026-09-05, covering the eight
+plug-ins built on this package — and the one that is not. Kept here rather than
 in any one of them because most of the gaps are shared, and a list that lives in
 seven places is seven lists that disagree.*
 
@@ -193,54 +193,70 @@ firmware update can invalidate any of it. That is the first row for a reason.
 | Nothing reads the two unknown bytes in a `trackEngine` frame | **Won't**, until there is a capture that explains them. Decoding a byte nobody understands into a label would be inventing a fact |
 | Scale and tonic lock on the device and only a power cycle is known to clear it. The interface says so; nothing prevents it | **Won't.** A control that refuses to do what it says is worse than one that warns |
 
+### SwiftVane — `aumu Vayn`
+
+*A breath-first wind voice: blow it, do not strike it.*
+
+The first instrument in the suite and the largest car behind any skateboard
+here: the JUCE Vane is 10,533 lines with a wavetable importer, MTS-ESP, a
+modulation matrix, a formant filter, a comb resonator, transients, presets and
+a WebView interface. This is one mono voice, one built-in table, one filter.
+
+What it keeps is what makes it Vane rather than a generic synth: breath is the
+amplitude, legato does not retrigger, and everything that could step glides.
+
+| Gap | Intent |
+|---|---|
+| **Never heard.** Its render path is covered by 34 checks including aliasing, clicks and segment offsets, and none of that is the same as somebody blowing into it | **Build** — meaning take the measurement. A wind instrument is a feel, and no harness has an opinion about feel |
+| Monophonic. The kernel merges MPE channels deliberately — one voice, whichever finger is expressing it — so a chord is not possible | **Decide.** Vane is "mono-capable" and this is the capable half. Polyphony means a voice allocator and per-note expression state, which is a real piece of work and a different instrument |
+| One built-in wavetable — the harmonic stack. No `.wav` import, no Serum/Vital frame detection, no library browser | **Build**, in that order, and the table format already supports it: `VaneWavetable` stores mip levels exactly as Vane's does, so an importer fills in frames and changes nothing else |
+| No MTS-ESP. The JUCE build retunes from a host tuning table | **Build.** It is the one feature on this list that this suite has a specific reason to care about, given how much of `Theory` is about what a scale *is* |
+| No modulation matrix, no LFOs, no second envelope | **Decide.** The matrix is a third of Vane's source and most of what makes it hard to learn. A skateboard with a mod matrix is a car |
+| Filter is low-pass only; band-pass and high-pass are two lines away and not exposed | **Decide.** Nothing here would drive the choice yet |
+| No formant filter, comb resonator, wavefolder or transient library | **Won't**, for now — and this is the row most worth having. These are what a decade of accretion looks like, and the rewrite's opportunity is not to do the accretion again |
+| The breath envelope's shape is four numbers, where it wants to be a recorded curve | **Build**, and the foundation is already there: `levelFor` is a pure function of phase and segment times precisely so a curve lookup can replace the arithmetic, and SwiftDrawnQurve on this same package already records one |
+| No presets. A synth without presets is a synth nobody hears twice | **Build.** Shared gap, and the one plug-in where it stops being optional |
+| Resonance at 1.0 is a clean sine, not the rich self-oscillation a real filter gives — no soft saturation on the feedback path | **Decide.** Noted in Vane's own file as future work and still future work |
+
 ---
 
-## The two that are not on this foundation
+## The one that is not on this foundation, and the one that changed its mind
 
-Seven of the nine plug-ins in the suite have a Swift-native version. The other
-two do not, and this section exists so that stays a decision rather than a gap
-somebody quietly closes later by building a broken one.
+Eight of the nine plug-ins in the suite have a Swift-native version. One does
+not, and this section exists so that stays a decision rather than a gap somebody
+quietly closes later by building a broken one.
 
 `Scripts/check-gaps.sh` only knows about plug-ins that exist beside the
-checkout, so neither of these would ever make it fail. That is exactly why they
-are written down.
+checkout, so this one would never make it fail. That is exactly why it is
+written down — along with the argument that *was* here for Vane, which was
+overruled, and is kept rather than deleted because a reversed decision is more
+instructive than a tidy page.
 
-### Vane — `aumi VAne` — **a synth, and this foundation has no audio path**
+### Vane — **built after all**
 
-*An MPE / MTS-ESP / CC-first wavetable synthesizer for wind and breath
-controllers.* 10,533 lines, `IS_SYNTH TRUE`.
+This section used to say **won't**, at length, and the argument was:
 
-Every plug-in on this package is an `aumi` MIDI processor. The kernel's three —
-now four — jobs are all about *messages*: schedule notes, rewrite notes, play
-curves, carry bytes. **None of them touches a sample.** There is no oscillator,
-no filter, no voice allocator, no `AVAudioPCMBuffer` being filled, and the
-render block's entire output is `mMIDIOutBlock`.
+> Every plug-in on this package is an `aumi` MIDI processor … None of them
+> touches a sample … A "Vane MVP on this foundation" would be one of two things,
+> and both are worse than not doing it.
 
-This is not a missing feature; it is the shape of the thing. PORTING.md §8's
-invariant — *nothing generates on the audio thread* — is what makes Foundation
-Models and Core ML usable in MelGen at all, and it is stated as a rule about
-generation because everything here decides off-thread and *looks up* on it. A
-synth inverts that: its render block is where the work is, by definition, and it
-must produce a sample every sample whether or not anything has been decided.
+That was overruled, and it should have been. What it got right was the
+*architecture* and what it got wrong was treating an architectural constraint as
+a reason not to build something. The two options it named were a synth that
+emits no audio, and "a second foundation wearing this one's name" — and there
+was a third it did not see: a **sibling target** that `Kernel` and `Shell` do
+not depend on, so a MIDI processor links not one line of it and the separation
+is a dependency edge rather than a promise in a document.
 
-So a "Vane MVP on this foundation" would be one of two things, and both are
-worse than not doing it:
+So `AudioKernel` and `Instrument` exist, `AUHost` was split out of `Shell` to
+serve both kinds of audio unit, and the plug-in is
+[SwiftVane](https://github.com/Enkerli/SwiftVane) — `aumu Vayn`. Its gaps are
+below with everyone else's.
 
-- A `aumi` plug-in that emits MIDI and no audio, which is not a synth.
-- A new `aumu` shell with its own kernel, sharing `Theory` and `UI` and
-  approximately nothing else — which is a *second* foundation wearing this one's
-  name, and the reason PORTING.md's layering is enforced by the compiler is to
-  stop that happening by accident.
-
-**Intent: won't**, and specifically won't *here*. A Swift AUv3 synth is a
-perfectly good project; it is not a plug-in on this package. If one is ever
-built, `Theory` and `UI` are what it should take, and it should take them by
-depending on this package rather than by growing an audio path inside it.
-
-The part of Vane that *would* fit is the expression side — breath, MPE, the
-gestural curves — and some of it already exists here in a different guise:
-SwiftDrawnQurve's lanes are a curve engine emitting CC and pitch bend. That is
-worth noticing and is not worth calling a port.
+The general lesson is worth keeping: **"this foundation cannot do X" is a claim
+about a shape, and shapes can be changed.** The question to ask of the next one
+is not whether the constraint is real but whether relaxing it costs more than
+the thing is worth.
 
 ### Suite Workspace — `aumi Wksp` — **a container, and the container is the product**
 
@@ -295,10 +311,11 @@ of this file. Gaps are honest; inert controls are not, and they are the one
 category here with no "decide" option.
 
 **5. A plug-in we decline to port gets an argument, not a silence.** The section
-above. `check-gaps.sh` can only notice a plug-in that exists, so the two that do
-not are the ones most likely to be built badly later by somebody who assumed
-nobody had thought about it. Both are **won't**, and both say what would have to
-change for that to be wrong.
+above. `check-gaps.sh` can only notice a plug-in that exists, so one that does
+not is the most likely to be built badly later by somebody who assumed nobody
+had thought about it. It says what would have to change for it to be wrong —
+and in Vane's case something did, which is the best evidence that writing the
+argument down was worth it.
 
 ---
 
