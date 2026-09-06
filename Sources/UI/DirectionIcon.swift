@@ -15,7 +15,7 @@
 import SwiftUI
 
 public struct DirectionIcon: Shape {
-    public enum Direction {
+    public enum Direction: Sendable {
         case backward, pingPong, forward
     }
 

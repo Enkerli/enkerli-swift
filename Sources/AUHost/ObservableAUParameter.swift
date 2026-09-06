@@ -105,6 +105,22 @@ public final class ObservableAUParameterGroup: ObservableAUParameterNode {
             dict[node.identifier] = observableNode
         }
     }
+
+    /// Every parameter under this group, at any depth.
+    ///
+    /// Flat, because the thing that wants it — finding a control by address —
+    /// does not care which group somebody filed it under. A plug-in is free to
+    /// put the transport in "global" or in "transport" or beside its own knobs,
+    /// and the lookup keeps working.
+    public var allObservableParameters: [ObservableAUParameter] {
+        children.values.flatMap { node -> [ObservableAUParameter] in
+            if let parameter = node as? ObservableAUParameter { return [parameter] }
+            if let group = node as? ObservableAUParameterGroup {
+                return group.allObservableParameters
+            }
+            return []
+        }
+    }
 }
 
 /// An Observable version of AUParameter
@@ -122,6 +138,14 @@ public final class ObservableAUParameter: ObservableAUParameterNode {
     private var observerToken: AUParameterObserverToken!
     private var editingState: EditingState = .inactive
 
+    /// The address the kernel acts on.
+    ///
+    /// Exposed so a control can be found by what it *does* rather than by what
+    /// it is called: `TransportParameters` looks the three transport controls up
+    /// this way, and a renamed identifier then cannot silently detach a control
+    /// from its parameter.
+    public let address: AUParameterAddress
+
     public let min: AUValue
     public let max: AUValue
     public let displayName: String
@@ -130,6 +154,7 @@ public final class ObservableAUParameter: ObservableAUParameterNode {
 
     public init(_ parameter: AUParameter) {
         self.parameter = parameter
+        self.address = parameter.address
         self.value = parameter.value
         self.min = parameter.minValue
         self.max = parameter.maxValue

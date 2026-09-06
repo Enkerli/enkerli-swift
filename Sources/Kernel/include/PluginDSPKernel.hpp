@@ -205,6 +205,13 @@ public:
         // opposite of what a diagnostic is for.
         sendPendingSysEx(bufferStartTime);
 
+        // Before the transport, like the burst and for the same reason: "stop
+        // everything" is a request a person made, and holding it until the host
+        // happens to be playing would make it work in one host and not another.
+        if (mShared.panicRequested.exchange(false, std::memory_order_acq_rel)) {
+            releaseEverything(bufferStartTime);
+        }
+
         // Ask the host for tempo and playhead position; fall back to the last
         // known tempo, and note whether the beat position is usable at all.
         mHostBeatValid = false;
@@ -576,6 +583,20 @@ public:
     /// How many events have ever been captured. The UI keeps its own cursor and
     /// reads forward from it, which is what makes the ring single-writer,
     /// single-reader and lock-free.
+    /// Releases every note this kernel is holding, on the next block.
+    ///
+    /// Both kinds: the sequence's own sounding notes, and the notes a transform
+    /// rewrote — the latter with **the mapping each one actually used**, which
+    /// is the whole difficulty of the transform path and is why this asks the
+    /// kernel rather than sending note-offs from outside. A panic that guessed
+    /// the mapping would leave exactly the notes it was called to stop.
+    ///
+    /// Set here and acted on in `process`, rather than sending from this thread:
+    /// whoever calls this is the UI, and the UI does not own the output block.
+    void requestPanic() {
+        mShared.panicRequested.store(true, std::memory_order_release);
+    }
+
     // MARK: - SysEx: the fourth job
     //
     // The kernel had three jobs — schedule notes, rewrite notes, play curves —
@@ -1204,6 +1225,26 @@ public:
         mMIDIOutBlock(sampleTime, 0, &eventList);
     }
 
+    /// Ends the sequence's notes and the transform's held notes.
+    ///
+    /// The transform table is the interesting half: `mHeldNotes` records what
+    /// was actually *sent* for each incoming (channel, note), so releasing it
+    /// releases the note the synth is really holding rather than the one
+    /// somebody played.
+    void releaseEverything(AUEventSampleTime sampleTime) {
+        releaseAllNotes(sampleTime);
+
+        for (uint32_t channel = 0; channel < 16; ++channel) {
+            for (uint32_t note = 0; note < 128; ++note) {
+                const uint8_t sent = mHeldNotes[channel][note];
+                if (sent == kNoHeldNote || sent == kMuted) { continue; }
+                sendNoteOffChannel(sampleTime, (uint8_t)channel, sent);
+                mHeldNotes[channel][note] = kNoHeldNote;
+            }
+        }
+        releaseCurveNotes(sampleTime);
+    }
+
     void handleMIDIEventList(AUEventSampleTime now, AUMIDIEventList const* midiEvent) {
         captureSysEx(&midiEvent->eventList);
 
@@ -1499,6 +1540,9 @@ public:
         /// Set when curves are switched off, so the render thread knows to end
         /// any note they left sounding. Cleared by the render thread.
         std::atomic<bool> curvesStopRequested{false};
+        /// Set by the UI thread when everything sounding should be released.
+        /// Cleared by the render thread once it has been.
+        std::atomic<bool> panicRequested{false};
         /// Which SysEx burst buffer is current. Incremented by the UI thread on
         /// commit; the render thread sends a buffer once per new value.
         std::atomic<uint32_t> sysExIndex{0};
@@ -1534,6 +1578,7 @@ public:
           curveIndex{other.curveIndex.load(std::memory_order_acquire)},
           curvesEnabled{other.curvesEnabled.load(std::memory_order_relaxed)},
           curvesStopRequested{other.curvesStopRequested.load(std::memory_order_relaxed)},
+          panicRequested{other.panicRequested.load(std::memory_order_relaxed)},
           sysExIndex{other.sysExIndex.load(std::memory_order_acquire)},
           sysExInWrite{other.sysExInWrite.load(std::memory_order_acquire)},
           sysExInTruncated{other.sysExInTruncated.load(std::memory_order_acquire)} {
@@ -1555,6 +1600,7 @@ public:
             curveIndex.store(other.curveIndex.load(std::memory_order_acquire), std::memory_order_release);
             curvesEnabled.store(other.curvesEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
             curvesStopRequested.store(other.curvesStopRequested.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            panicRequested.store(other.panicRequested.load(std::memory_order_relaxed), std::memory_order_relaxed);
             sysExIndex.store(other.sysExIndex.load(std::memory_order_acquire), std::memory_order_release);
             sysExInWrite.store(other.sysExInWrite.load(std::memory_order_acquire), std::memory_order_release);
             sysExInTruncated.store(other.sysExInTruncated.load(std::memory_order_acquire), std::memory_order_release);

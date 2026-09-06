@@ -92,6 +92,41 @@ open class PluginAudioUnit: AUAudioUnit, ParameterTreeHosting, @unchecked Sendab
 
     /// How many complete loop passes have played. The UI polls this to decide
     /// when to generate the next take.
+    // MARK: - Panic
+
+    /// Ends every note this plug-in could be responsible for.
+    ///
+    /// Nothing in the suite had this, and it is the cheapest possible insurance
+    /// against the worst bug a MIDI processor has: a note-on whose note-off
+    /// never came, sounding in somebody else's synth, outliving the plug-in
+    /// being removed from the chain. The kernel already tracks what it holds for
+    /// two of its jobs; what was missing was a way for a person to say "stop".
+    ///
+    /// Three things, in this order, and the order matters:
+    ///
+    ///  1. **The kernel releases what it is holding**, with the mapping each
+    ///     note actually used — a transformed note-on needs its own note-off,
+    ///     not the original's.
+    ///  2. **All-sound-off (CC120) on all sixteen channels.** Stops notes this
+    ///     plug-in never started, which is most of what a person means by panic.
+    ///  3. **All-notes-off (CC123)** after it, because some instruments treat
+    ///     120 as an envelope cut and 123 as a release, and a stuck note wants
+    ///     both.
+    ///
+    /// Deliberately *not* a parameter: a host automating panic at bar 17 is a
+    /// project that silences itself, and the situation this is for — a sender
+    /// that went away — is not one a timeline knows about.
+    public func panic() {
+        kernel.requestPanic()
+        var messages: [[UInt8]] = []
+        for controller: UInt8 in [120, 123] {
+            for channel in 0..<16 {
+                messages.append([0xB0 | UInt8(channel), controller, 0])
+            }
+        }
+        sendBurst(messages)
+    }
+
     // MARK: - Talking to a device
 
     /// How far the UI has read into the kernel's inbound SysEx ring.

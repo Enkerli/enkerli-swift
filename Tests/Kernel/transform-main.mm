@@ -69,11 +69,30 @@ static AUMIDIEventListBlock recordingBlock() {
                 const uint32_t first = packet->words[w];
                 gRawFirstWords.push_back(first);
                 const uint8_t type = (uint8_t)((first >> 28) & 0xF);
-                if (type != 0x2) { continue; }
-                gSent.push_back({ (uint8_t)((first >> 20) & 0xF),
-                                  (uint8_t)((first >> 16) & 0xF),
-                                  (uint8_t)((first >> 8) & 0x7F),
-                                  (uint8_t)(first & 0x7F) });
+                if (type == 0x2) {
+                    // MIDI 1.0 in one word: the transform path and the curve
+                    // lanes.
+                    gSent.push_back({ (uint8_t)((first >> 20) & 0xF),
+                                      (uint8_t)((first >> 16) & 0xF),
+                                      (uint8_t)((first >> 8) & 0x7F),
+                                      (uint8_t)(first & 0x7F) });
+                    continue;
+                }
+                if (type == 0x4 && w + 1 < packet->wordCount) {
+                    // MIDI 2.0 in two words: the *sequence* path, which uses
+                    // 16-bit velocity. This harness recorded only type 0x2 until
+                    // 2026-09, so every note the scheduler sent was invisible to
+                    // it — and a check that expected one failed while the kernel
+                    // was correct. Worth stating plainly: for a while this file
+                    // could only see half of what the kernel does.
+                    const uint32_t second = packet->words[w + 1];
+                    gSent.push_back({ (uint8_t)((first >> 20) & 0xF),
+                                      (uint8_t)((first >> 16) & 0xF),
+                                      (uint8_t)((first >> 8) & 0x7F),
+                                      (uint8_t)((second >> 25) & 0x7F) });
+                    w += 1;
+                    continue;
+                }
             }
             packet = MIDIEventPacketNext(packet);
         }
@@ -283,6 +302,99 @@ int main() {
         const bool intact = gRawFirstWords.size() == 1 && gRawFirstWords[0] == cc;
         check("a control change is forwarded byte for byte", intact,
               intact ? "" : (gRawFirstWords.empty() ? "nothing came out" : "the word changed"));
+    }
+
+    // ── panic ──────────────────────────────────────────────────────────────
+    //
+    // The worst bug a MIDI processor has is a note-on whose note-off never came,
+    // sounding in somebody else's synth, outliving this plug-in being removed
+    // from the chain. The kernel already tracked what it holds; what was missing
+    // until now was a way for a person to say stop.
+    //
+    // The transform half is the one that could be wrong quietly: a note-on for
+    // 61 mapped to 60 must be released as **60**, and a panic that guessed would
+    // leave exactly the note it was called to stop.
+    {
+        PluginDSPKernel kernel;
+        kernel.initialize(48000);
+        kernel.setMIDIOutputEventBlock(recordingBlock());
+
+        kernel.beginNoteMapUpdate();
+        kernel.setMappedNote(61, 60);
+        kernel.commitNoteMap();
+        kernel.setTransformEnabled(true);
+
+        feed(kernel, noteWord(0x9, 3, 61, 100));
+        resetSent();
+        kernel.requestPanic();
+        kernel.process(0, 512);
+
+        bool releasedTheMappedNote = false;
+        bool releasedTheOriginal = false;
+        for (const Sent &sent : gSent) {
+            if (sent.status != 0x8) { continue; }
+            if (sent.note == 60 && sent.channel == 3) { releasedTheMappedNote = true; }
+            if (sent.note == 61) { releasedTheOriginal = true; }
+        }
+        check("panic releases a transformed note as what was actually sent",
+              releasedTheMappedNote, "note-off for 60 on channel 3");
+        check("and not as what was played, which would leave the real one stuck",
+              !releasedTheOriginal);
+
+        // A second panic must not release it twice: a note-off for a note that
+        // is no longer sounding is harmless in most synths and not in all, and
+        // it would mean the held table was never cleared.
+        resetSent();
+        kernel.requestPanic();
+        kernel.process(512, 512);
+        bool releasedAgain = false;
+        for (const Sent &sent : gSent) {
+            if (sent.status == 0x8 && sent.note == 60) { releasedAgain = true; }
+        }
+        check("and the held table is cleared, so a second panic sends nothing",
+              !releasedAgain);
+    }
+    {
+        // A panic while nothing is sounding must be silent rather than sending
+        // 2048 speculative note-offs.
+        PluginDSPKernel kernel;
+        kernel.initialize(48000);
+        kernel.setMIDIOutputEventBlock(recordingBlock());
+        resetSent();
+        kernel.requestPanic();
+        kernel.process(0, 512);
+        check("a panic with nothing sounding sends nothing", gSent.empty(),
+              std::to_string(gSent.size()) + " messages");
+    }
+    {
+        // A sequence note released **while still playing**.
+        //
+        // The first version of this checked a note left over after the transport
+        // stopped, and it failed — because stopping already calls
+        // `releaseAllNotes`, so there was nothing left to release and the check
+        // was describing a situation the kernel does not allow. The kernel was
+        // right; the check was checking a hypothetical.
+        //
+        // What is real is a long note sounding right now and somebody reaching
+        // for panic, which is what this does.
+        PluginDSPKernel kernel;
+        kernel.initialize(48000);
+        kernel.setMIDIOutputEventBlock(recordingBlock());
+        kernel.beginSequenceUpdate();
+        kernel.appendSequenceNote(0.0, 16.0, 64, 100);
+        kernel.commitSequence(16.0, true);
+        kernel.setParameter(playMelody, 1);
+        kernel.process(0, 512);
+
+        resetSent();
+        kernel.requestPanic();
+        kernel.process(512, 512);
+        bool released = false;
+        for (const Sent &sent : gSent) {
+            if (sent.status == 0x8 && sent.note == 64) { released = true; }
+        }
+        check("and a sounding sequence note is released mid-flight",
+              released, "which is the case panic exists for");
     }
 
     printf("\n");
