@@ -198,6 +198,13 @@ public:
 
         if (mBypassed) { return; }
 
+        // Before anything else, and outside the transport entirely. A burst is
+        // a request the user made — "send these bytes now" — and holding it
+        // until the host happens to be playing would make a diagnostic that
+        // works in one host and mysteriously does not in another, which is the
+        // opposite of what a diagnostic is for.
+        sendPendingSysEx(bufferStartTime);
+
         // Ask the host for tempo and playhead position; fall back to the last
         // known tempo, and note whether the beat position is usable at all.
         mHostBeatValid = false;
@@ -569,6 +576,100 @@ public:
     /// How many events have ever been captured. The UI keeps its own cursor and
     /// reads forward from it, which is what makes the ring single-writer,
     /// single-reader and lock-free.
+    // MARK: - SysEx: the fourth job
+    //
+    // The kernel had three jobs — schedule notes, rewrite notes, play curves —
+    // and all three deal in things it can *construct*: a note number, a
+    // controller value. SysEx is different in kind. It is opaque bytes decided
+    // somewhere else, and the render thread's entire contribution is carrying
+    // them without touching them.
+    //
+    // That makes it the easiest of the four to get right and the easiest to get
+    // subtly wrong, because "bytes arrive intact" is the whole contract and
+    // there is no musical symptom when it breaks. A wrong note is audible; a
+    // truncated frame is a device that does not answer.
+    //
+    // Out is a *burst*, not a stream: the UI fills a buffer and commits it, and
+    // the render thread sends that buffer once. A second identical burst needs a
+    // second commit. That is deliberate — a probe asking "did these exact bytes
+    // get out?" must be able to tell this burst's echo from the last one's, and
+    // a queue that re-sent on every block could not.
+
+    static constexpr uint32_t kSysExMaxBytes = 64;
+    static constexpr uint32_t kSysExBurstFrames = 16;
+    static constexpr uint32_t kSysExInCapacity = 64;
+
+    /// One SysEx frame, F0 and F7 included, in a fixed slot.
+    ///
+    /// Up here with the constants rather than down with the other storage,
+    /// because `sendSysExFrame` names it and C++ reads a class body in order for
+    /// member *signatures* even though it defers member bodies. Putting it below
+    /// gave `unknown type name 'SysExFrame'` on the declaration alone.
+    struct SysExFrame {
+        uint8_t bytes[kSysExMaxBytes] = {};
+        uint32_t length = 0;
+    };
+    struct SysExBurst {
+        SysExFrame frames[kSysExBurstFrames];
+        uint32_t count = 0;
+    };
+
+    /// Starts filling the burst that is not being read.
+    void beginSysExBurst() {
+        const uint32_t back = 1 - (mShared.sysExIndex.load(std::memory_order_acquire) & 1);
+        mSysExOut[back].count = 0;
+    }
+
+    /// Adds one frame, F0 and F7 included, to the burst being filled.
+    ///
+    /// Returns false rather than truncating. A SysEx frame that is silently cut
+    /// short is the exact failure this whole capability exists to detect, and
+    /// producing one here to avoid an awkward return value would be absurd.
+    bool addSysExFrame(const uint8_t *bytes, uint32_t length) {
+        if (bytes == nullptr || length < 2 || length > kSysExMaxBytes) { return false; }
+        const uint32_t back = 1 - (mShared.sysExIndex.load(std::memory_order_acquire) & 1);
+        SysExBurst &burst = mSysExOut[back];
+        if (burst.count >= kSysExBurstFrames) { return false; }
+        SysExFrame &frame = burst.frames[burst.count];
+        for (uint32_t index = 0; index < length; ++index) { frame.bytes[index] = bytes[index]; }
+        frame.length = length;
+        burst.count += 1;
+        return true;
+    }
+
+    /// Publishes the burst. The render thread sends it once, on its next block.
+    void commitSysExBurst() {
+        const uint32_t current = mShared.sysExIndex.load(std::memory_order_acquire);
+        mShared.sysExIndex.store(current + 1, std::memory_order_release);
+    }
+
+    /// How many frames have ever arrived. The UI reads forward from its own
+    /// cursor, exactly as it does for captured notes.
+    uint64_t sysExInCount() const {
+        return mShared.sysExInWrite.load(std::memory_order_acquire);
+    }
+
+    uint64_t oldestSysExIn() const {
+        const uint64_t written = sysExInCount();
+        return written > kSysExInCapacity ? written - kSysExInCapacity : 0;
+    }
+
+    uint32_t sysExInLength(uint64_t index) const {
+        return mSysExIn[index % kSysExInCapacity].length;
+    }
+
+    uint8_t sysExInByte(uint64_t index, uint32_t offset) const {
+        const SysExFrame &frame = mSysExIn[index % kSysExInCapacity];
+        return offset < frame.length ? frame.bytes[offset] : 0;
+    }
+
+    /// Whether an arriving frame was longer than a slot. Reported rather than
+    /// hidden: a truncated frame in the ring must never be mistaken for what
+    /// the wire carried.
+    uint64_t sysExInTruncated() const {
+        return mShared.sysExInTruncated.load(std::memory_order_acquire);
+    }
+
     uint64_t capturedEventCount() const {
         return mShared.captureWrite.load(std::memory_order_acquire);
     }
@@ -942,7 +1043,142 @@ public:
         }
     }
 
+    /// Pulls SysEx7 frames out of a UMP list into the inbound ring.
+    ///
+    /// Message type 0x3 is SysEx7: two words per packet, six data bytes maximum,
+    /// and a status nibble saying whether this packet is the whole frame (0), its
+    /// start (1), a middle (2) or its end (3). So a frame is reassembled across
+    /// packets and, in principle, across render blocks — which is why the
+    /// partial buffer is a member and not a local.
+    ///
+    /// The F0 and F7 are *not* on the wire in UMP; they are framing that MIDI
+    /// 1.0 needed and SysEx7 replaced with the status nibble. They are put back
+    /// here so that everything above this line sees one representation of a
+    /// frame, the one the protocol documents are written in.
+    void captureSysEx(const MIDIEventList *list) {
+        if (list == nullptr) { return; }
+        const MIDIEventPacket *packet = &list->packet[0];
+        for (uint32_t index = 0; index < list->numPackets; ++index) {
+            for (uint32_t word = 0; word < packet->wordCount; ++word) {
+                const uint32_t first = packet->words[word];
+                const uint8_t messageType = (uint8_t)((first >> 28) & 0xF);
+                if (messageType != 0x3) {
+                    const uint8_t words = umpWordCount(messageType);
+                    if (words > 1) { word += (words - 1); }
+                    continue;
+                }
+                if (word + 1 >= packet->wordCount) { break; }
+                const uint32_t second = packet->words[word + 1];
+                const uint8_t status = (uint8_t)((first >> 20) & 0xF);
+                const uint8_t count = (uint8_t)((first >> 16) & 0xF);
+
+                if (status == 0x0 || status == 0x1) {
+                    mSysExPartial.length = 0;
+                    mSysExOverflowed = false;
+                    mSysExInProgress = true;
+                    appendSysExByte(0xF0);
+                }
+                if (!mSysExInProgress) { word += 1; continue; }
+
+                const uint8_t data[6] = {
+                    (uint8_t)((first >> 8) & 0x7F), (uint8_t)(first & 0x7F),
+                    (uint8_t)((second >> 24) & 0x7F), (uint8_t)((second >> 16) & 0x7F),
+                    (uint8_t)((second >> 8) & 0x7F), (uint8_t)(second & 0x7F)
+                };
+                for (uint8_t byte = 0; byte < count && byte < 6; ++byte) {
+                    appendSysExByte(data[byte]);
+                }
+
+                if (status == 0x0 || status == 0x3) {
+                    appendSysExByte(0xF7);
+                    pushSysExIn();
+                    mSysExInProgress = false;
+                }
+                word += 1;
+            }
+            packet = MIDIEventPacketNext(packet);
+        }
+    }
+
+    void appendSysExByte(uint8_t byte) {
+        if (mSysExPartial.length >= kSysExMaxBytes) { mSysExOverflowed = true; return; }
+        mSysExPartial.bytes[mSysExPartial.length++] = byte;
+    }
+
+    /// One frame into the ring. Never blocks; the oldest is lost if the UI has
+    /// not drained it, which is the same trade the note capture makes.
+    void pushSysExIn() {
+        if (mSysExOverflowed) {
+            mShared.sysExInTruncated.fetch_add(1, std::memory_order_relaxed);
+        }
+        const uint64_t sequence = mShared.sysExInWrite.load(std::memory_order_relaxed);
+        mSysExIn[sequence % kSysExInCapacity] = mSysExPartial;
+        mShared.sysExInWrite.store(sequence + 1, std::memory_order_release);
+        mSysExPartial.length = 0;
+        mSysExOverflowed = false;
+    }
+
+    /// Sends a committed burst, once.
+    ///
+    /// Compared against the render thread's own counter rather than a flag the
+    /// UI clears, so a commit that lands while this block is running is sent on
+    /// the next one instead of being lost or sent twice.
+    void sendPendingSysEx(AUEventSampleTime sampleTime) {
+        const uint32_t committed = mShared.sysExIndex.load(std::memory_order_acquire);
+        if (committed == mSysExSent) { return; }
+        mSysExSent = committed;
+        const SysExBurst &burst = mSysExOut[committed & 1];
+        for (uint32_t index = 0; index < burst.count; ++index) {
+            sendSysExFrame(sampleTime, burst.frames[index]);
+        }
+    }
+
+    /// One frame out, as SysEx7 packets of at most six data bytes.
+    ///
+    /// The F0 and F7 the caller supplied are stripped again here, for the reason
+    /// given above `captureSysEx`: they are MIDI 1.0 framing, and UMP carries
+    /// the same information in the status nibble. Sending them as data bytes
+    /// would produce a frame no device accepts — and, worse, one that looks
+    /// right in a byte dump.
+    void sendSysExFrame(AUEventSampleTime sampleTime, const SysExFrame &frame) {
+        if (frame.length < 2) { return; }
+        const uint8_t *data = frame.bytes + 1;
+        const uint32_t total = frame.length - 2;
+
+        if (mLegacyMIDIOutBlock && !mMIDIOutBlock) {
+            mLegacyMIDIOutBlock(sampleTime, 0, frame.length, frame.bytes);
+            return;
+        }
+        if (!mMIDIOutBlock) { return; }
+
+        MIDIEventList eventList = {};
+        MIDIEventPacket *packet = MIDIEventListInit(&eventList, kMIDIProtocol_2_0);
+        uint32_t sent = 0;
+        do {
+            const uint32_t chunk = (total - sent) > 6 ? 6 : (total - sent);
+            const bool isFirst = sent == 0;
+            const bool isLast = sent + chunk >= total;
+            const uint8_t status = isFirst ? (isLast ? 0x0 : 0x1) : (isLast ? 0x3 : 0x2);
+
+            uint8_t bytes[6] = {};
+            for (uint32_t index = 0; index < chunk; ++index) { bytes[index] = data[sent + index]; }
+
+            const uint32_t words[2] = {
+                ((uint32_t)0x3 << 28) | ((uint32_t)status << 20) | ((uint32_t)chunk << 16)
+                    | ((uint32_t)bytes[0] << 8) | (uint32_t)bytes[1],
+                ((uint32_t)bytes[2] << 24) | ((uint32_t)bytes[3] << 16)
+                    | ((uint32_t)bytes[4] << 8) | (uint32_t)bytes[5]
+            };
+            packet = MIDIEventListAdd(&eventList, sizeof(MIDIEventList), packet, 0, 2, words);
+            sent += chunk;
+        } while (sent < total);
+
+        mMIDIOutBlock(sampleTime, 0, &eventList);
+    }
+
     void handleMIDIEventList(AUEventSampleTime now, AUMIDIEventList const* midiEvent) {
+        captureSysEx(&midiEvent->eventList);
+
         // Capture before forwarding. The capture is a fixed ring written by this
         // thread and read by the UI, so nothing here allocates, locks or blocks —
         // the whole point of learning from playing is that it costs the render
@@ -1138,6 +1374,20 @@ public:
     bool mCaptureEnabled = false;
     CapturedEvent mCapture[kCaptureCapacity];
 
+    /// Double-buffered, like the sequence and the curves and for the same
+    /// reason: the UI fills one while the render thread reads the other.
+    SysExBurst mSysExOut[2];
+    /// The generation the render thread has already sent. Its own; not shared.
+    uint32_t mSysExSent = 0;
+
+    SysExFrame mSysExIn[kSysExInCapacity];
+    /// Partial reassembly across UMP packets. A SysEx7 frame arrives as up to
+    /// six data bytes per packet with a start/continue/end status, so a frame
+    /// spans packets and — in principle — render blocks.
+    SysExFrame mSysExPartial;
+    bool mSysExInProgress = false;
+    bool mSysExOverflowed = false;
+
     // Melody playback state
     struct ActiveNote {
         double offBeat = 0; // timeline beat at which to release
@@ -1221,6 +1471,13 @@ public:
         /// Set when curves are switched off, so the render thread knows to end
         /// any note they left sounding. Cleared by the render thread.
         std::atomic<bool> curvesStopRequested{false};
+        /// Which SysEx burst buffer is current. Incremented by the UI thread on
+        /// commit; the render thread sends a buffer once per new value.
+        std::atomic<uint32_t> sysExIndex{0};
+        /// How many SysEx frames have arrived, ever.
+        std::atomic<uint64_t> sysExInWrite{0};
+        /// How many arriving frames did not fit a slot.
+        std::atomic<uint64_t> sysExInTruncated{0};
         /// Where each lane's playhead is, 0..1, or -1 when it is not running.
         ///
         /// In here rather than beside the runtimes because of the note at the
@@ -1248,7 +1505,10 @@ public:
           transformEnabled{other.transformEnabled.load(std::memory_order_relaxed)},
           curveIndex{other.curveIndex.load(std::memory_order_acquire)},
           curvesEnabled{other.curvesEnabled.load(std::memory_order_relaxed)},
-          curvesStopRequested{other.curvesStopRequested.load(std::memory_order_relaxed)} {
+          curvesStopRequested{other.curvesStopRequested.load(std::memory_order_relaxed)},
+          sysExIndex{other.sysExIndex.load(std::memory_order_acquire)},
+          sysExInWrite{other.sysExInWrite.load(std::memory_order_acquire)},
+          sysExInTruncated{other.sysExInTruncated.load(std::memory_order_acquire)} {
             for (uint32_t lane = 0; lane < kMaxCurveLanes; ++lane) {
                 curvePhases[lane].store(other.curvePhases[lane].load(std::memory_order_relaxed),
                                         std::memory_order_relaxed);
@@ -1267,6 +1527,9 @@ public:
             curveIndex.store(other.curveIndex.load(std::memory_order_acquire), std::memory_order_release);
             curvesEnabled.store(other.curvesEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
             curvesStopRequested.store(other.curvesStopRequested.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            sysExIndex.store(other.sysExIndex.load(std::memory_order_acquire), std::memory_order_release);
+            sysExInWrite.store(other.sysExInWrite.load(std::memory_order_acquire), std::memory_order_release);
+            sysExInTruncated.store(other.sysExInTruncated.load(std::memory_order_acquire), std::memory_order_release);
             for (uint32_t lane = 0; lane < kMaxCurveLanes; ++lane) {
                 curvePhases[lane].store(other.curvePhases[lane].load(std::memory_order_relaxed),
                                         std::memory_order_relaxed);

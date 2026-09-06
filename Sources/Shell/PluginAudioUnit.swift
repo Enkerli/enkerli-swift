@@ -91,6 +91,72 @@ open class PluginAudioUnit: AUAudioUnit, @unchecked Sendable
 
     /// How many complete loop passes have played. The UI polls this to decide
     /// when to generate the next take.
+    // MARK: - SysEx
+
+    /// How far the UI has read into the kernel's inbound SysEx ring.
+    private var sysExCursor: UInt64 = 0
+
+    /// Sends a burst of SysEx frames, once.
+    ///
+    /// Each frame includes its own `F0` and `F7`, because that is how every
+    /// device protocol document in this suite is written. The kernel strips them
+    /// on the way into UMP and puts them back on the way out, so nothing above
+    /// this line has to know that MIDI 2.0 removed the framing bytes.
+    ///
+    /// A burst, not a queue: this is sent exactly once, on the next render
+    /// block. Sending the same bytes again means calling this again — which is
+    /// what makes it possible to tell *this* burst's answer from the last one's.
+    ///
+    /// - Returns: the frames that were refused, if any. A frame is refused when
+    ///   it is longer than the kernel's slot or when the burst is full. Refusing
+    ///   is deliberate: a SysEx frame that is silently truncated is precisely
+    ///   the failure this whole path exists to detect.
+    @discardableResult
+    public func sendSysEx(_ frames: [[UInt8]]) -> [[UInt8]] {
+        kernel.beginSysExBurst()
+        var refused: [[UInt8]] = []
+        for frame in frames {
+            let accepted = frame.withUnsafeBufferPointer { buffer in
+                kernel.addSysExFrame(buffer.baseAddress, UInt32(frame.count))
+            }
+            if !accepted { refused.append(frame) }
+        }
+        kernel.commitSysExBurst()
+        return refused
+    }
+
+    /// Everything that has arrived since the last drain, `F0` and `F7` included.
+    ///
+    /// Same ring discipline as the note capture: single writer, single reader,
+    /// lock-free, and the oldest frames are lost rather than the render thread
+    /// waiting for anybody. Unlike notes, a lost frame here is not a nuisance —
+    /// it is a missing answer — so `sysExTruncatedCount` exists to say when the
+    /// ring could not hold what arrived.
+    public func drainSysEx() -> [[UInt8]] {
+        let written = kernel.sysExInCount()
+        guard written > sysExCursor else { return [] }
+        var index = max(sysExCursor, kernel.oldestSysExIn())
+        var frames: [[UInt8]] = []
+        while index < written {
+            let length = kernel.sysExInLength(index)
+            var bytes: [UInt8] = []
+            bytes.reserveCapacity(Int(length))
+            for offset in 0..<length {
+                bytes.append(kernel.sysExInByte(index, offset))
+            }
+            frames.append(bytes)
+            index += 1
+        }
+        sysExCursor = written
+        return frames
+    }
+
+    /// How many arriving frames were longer than the kernel could hold.
+    ///
+    /// Not zero means a byte dump above is shorter than the wire was, and any
+    /// conclusion drawn from it is wrong. Worth showing rather than logging.
+    public var sysExTruncatedCount: UInt64 { kernel.sysExInTruncated() }
+
     // MARK: - Capture
 
     /// How far the UI has read into the kernel's capture ring.
